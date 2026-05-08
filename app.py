@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# KEY GENERATOR + VERIFICATION SERVER - RENDER READY (FIXED IP)
+# KEY GENERATOR + VERIFICATION SERVER - RENDER READY (FINAL v3)
 
 from flask import Flask, request, jsonify
 import requests
@@ -26,7 +26,10 @@ DEFAULT_VALIDITY_HOURS = 6
 EZ4_SESSION = None
 EZ4_SESSION_TIME = 0
 
+# Key DB: {key: {"url": "...", "created": ts, "validity_hours": 6, "used_ips": ["ip1","ip2"]}}
 KEYS_DB = {}
+
+# IP tracking: {"ip": {"keys_taken": 2, "first_request": ts}}
 IP_DB = {}
 
 # ======================= HELPERS =======================
@@ -34,18 +37,7 @@ def random_key(length=8):
     chars = string.ascii_lowercase + string.digits
     return ''.join(random.choice(chars) for _ in range(length))
 
-def clean_expired_keys():
-    now = time.time()
-    expired = []
-    for k, v in KEYS_DB.items():
-        validity = v.get("validity_hours", DEFAULT_VALIDITY_HOURS) * 3600
-        if now - v["created"] > validity:
-            expired.append(k)
-    for k in expired:
-        del KEYS_DB[k]
-
 def get_real_ip():
-    """Get real client IP (works behind proxy)"""
     return request.headers.get('X-Forwarded-For', request.remote_addr).split(',')[0].strip()
 
 # ==================== EZ4 SESSION MANAGER ====================
@@ -144,8 +136,6 @@ def create_final_url(long_url):
 # ======================= API =======================
 @app.route('/get-key', methods=['GET'])
 def get_key():
-    clean_expired_keys()
-    
     user_ip = get_real_ip()
     now = time.time()
     
@@ -156,48 +146,68 @@ def get_key():
     except:
         validity_hours = DEFAULT_VALIDITY_HOURS
     
-    # 🔥 CHECK IF IP ALREADY HAS A VALID KEY
+    # ==================== RATE LIMIT: 3 MIN, MAX 2 KEYS ====================
+    if user_ip in IP_DB:
+        ip_data = IP_DB[user_ip]
+        
+        if now - ip_data["first_request"] < 180:  # 3 minutes
+            if ip_data["keys_taken"] >= 2:
+                # Rate limit hit — existing keys se koi valid key dhundho
+                for k, v in KEYS_DB.items():
+                    if user_ip in v.get("used_ips", []):
+                        validity_sec = v.get("validity_hours", DEFAULT_VALIDITY_HOURS) * 3600
+                        if now - v["created"] < validity_sec:
+                            return jsonify({
+                                "status": "success",
+                                "key": k,
+                                "url": v["url"],
+                                "validity_hours": v.get("validity_hours", DEFAULT_VALIDITY_HOURS),
+                                "expires_in": round((validity_sec - (now - v["created"])) / 3600, 1),
+                                "message": "Rate limit! Returning your existing key."
+                            })
+                # No valid key found — reset counter
+                ip_data["keys_taken"] = 0
+                ip_data["first_request"] = now
+            else:
+                ip_data["keys_taken"] += 1
+        else:
+            ip_data["keys_taken"] = 1
+            ip_data["first_request"] = now
+    else:
+        IP_DB[user_ip] = {"keys_taken": 1, "first_request": now}
+    
+    # ==================== KYA YE IP KISI AUR KEY MEIN HAI? ====================
     for k, v in KEYS_DB.items():
-        if user_ip in v.get("ips", []):
-            validity_sec = v.get("validity_hours", DEFAULT_VALIDITY_HOURS) * 3600
-            if now - v["created"] < validity_sec:
+        validity_sec = v.get("validity_hours", DEFAULT_VALIDITY_HOURS) * 3600
+        if now - v["created"] < validity_sec:  # Key still valid
+            if user_ip in v.get("used_ips", []):
+                # Ye IP already is key ka hissa hai — wahi do
                 return jsonify({
                     "status": "success",
                     "key": k,
                     "url": v["url"],
                     "validity_hours": v.get("validity_hours", DEFAULT_VALIDITY_HOURS),
                     "expires_in": round((validity_sec - (now - v["created"])) / 3600, 1),
-                    "message": "Existing key is still valid for your IP"
+                    "message": "Your existing key is still valid!"
                 })
     
-    # 🔥 IP LIMIT CHECK
-    if user_ip in IP_DB:
-        ip_data = IP_DB[user_ip]
-        if now - ip_data["last_request"] < 600 and ip_data["request_count"] >= 2:
-            existing_key = ip_data.get("key")
-            if existing_key and existing_key in KEYS_DB:
-                v = KEYS_DB[existing_key]
-                validity_sec = v.get("validity_hours", DEFAULT_VALIDITY_HOURS) * 3600
-                if now - v["created"] < validity_sec:
-                    return jsonify({
-                        "status": "success",
-                        "key": existing_key,
-                        "url": v["url"],
-                        "validity_hours": v.get("validity_hours", DEFAULT_VALIDITY_HOURS),
-                        "expires_in": round((validity_sec - (now - v["created"])) / 3600, 1),
-                        "message": "Request limit reached, returning existing key"
-                    })
-                else:
-                    del KEYS_DB[existing_key]
-        
-        if now - ip_data["last_request"] < 600:
-            ip_data["request_count"] += 1
-        else:
-            ip_data["request_count"] = 1
-        ip_data["last_request"] = now
-    else:
-        IP_DB[user_ip] = {"key": "", "request_count": 1, "last_request": now}
+    # ==================== EXISTING KEY DHUNDHO JO IS IP KO NAHI DIYI ====================
+    for k, v in KEYS_DB.items():
+        validity_sec = v.get("validity_hours", DEFAULT_VALIDITY_HOURS) * 3600
+        if now - v["created"] < validity_sec:  # Key still valid
+            if user_ip not in v.get("used_ips", []):
+                # 🔥 Ye key is IP ko nahi di gayi — chipka do!
+                KEYS_DB[k]["used_ips"].append(user_ip)
+                return jsonify({
+                    "status": "success",
+                    "key": k,
+                    "url": v["url"],
+                    "validity_hours": v.get("validity_hours", DEFAULT_VALIDITY_HOURS),
+                    "expires_in": round((validity_sec - (now - v["created"])) / 3600, 1),
+                    "message": "Key assigned to your IP"
+                })
     
+    # ==================== KOI KEY NAHI MILI — NEW BANAO ====================
     try:
         key = random_key()
         
@@ -216,9 +226,8 @@ def get_key():
             "url": final_url,
             "created": now,
             "validity_hours": validity_hours,
-            "ips": [user_ip]
+            "used_ips": [user_ip]
         }
-        IP_DB[user_ip]["key"] = key
         
         return jsonify({
             "status": "success",
@@ -233,8 +242,6 @@ def get_key():
 
 @app.route('/verify-key', methods=['POST'])
 def verify_key():
-    clean_expired_keys()
-    
     data = request.json or {}
     key = data.get('key', '')
     
@@ -263,3 +270,4 @@ def home():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=10000)
+
