@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# KEY GENERATOR + VERIFICATION SERVER - RENDER READY (CUSTOM VALIDITY)
+# KEY GENERATOR + VERIFICATION SERVER - RENDER READY (FIXED IP)
 
 from flask import Flask, request, jsonify
 import requests
@@ -26,8 +26,8 @@ DEFAULT_VALIDITY_HOURS = 6
 EZ4_SESSION = None
 EZ4_SESSION_TIME = 0
 
-KEYS_DB = {}  # {key: {"url": "...", "created": ts, "validity_hours": 6, "ips": ["ip1"]}}
-IP_DB = {}    # {"ip": {"key": "abc", "request_count": 1, "last_request": ts}}
+KEYS_DB = {}
+IP_DB = {}
 
 # ======================= HELPERS =======================
 def random_key(length=8):
@@ -44,11 +44,14 @@ def clean_expired_keys():
     for k in expired:
         del KEYS_DB[k]
 
+def get_real_ip():
+    """Get real client IP (works behind proxy)"""
+    return request.headers.get('X-Forwarded-For', request.remote_addr).split(',')[0].strip()
+
 # ==================== EZ4 SESSION MANAGER ====================
 def get_ez4_session():
     global EZ4_SESSION, EZ4_SESSION_TIME
     
-    # Use cached if under 25 minutes
     if EZ4_SESSION and (time.time() - EZ4_SESSION_TIME) < 1500:
         return EZ4_SESSION
     
@@ -63,7 +66,7 @@ def get_ez4_session():
         tu = re.search(r'name="_Token\[unlocked\]"[^>]*value="([^"]+)"', html)
         
         if not csrf:
-            return None
+            return EZ4_SESSION
         
         login_data = (
             f"_method=POST&_csrfToken={csrf.group(1)}&username={EZ4_USER}&password={EZ4_PASS}"
@@ -78,7 +81,7 @@ def get_ez4_session():
         EZ4_SESSION_TIME = time.time()
         return session
     except:
-        return EZ4_SESSION  # Return old session if login fails
+        return EZ4_SESSION
 
 def shorten_ez4(long_url):
     session = get_ez4_session()
@@ -110,10 +113,8 @@ def shorten_ez4(long_url):
             return result.get("url")
     except:
         pass
-    
     return None
 
-# ==================== CREATE TEXT KEY ====================
 def create_text_key(key):
     try:
         resp = requests.post(
@@ -127,7 +128,6 @@ def create_text_key(key):
     except:
         return None
 
-# ==================== CREATE FINAL URL ====================
 def create_final_url(long_url):
     try:
         resp = requests.post(
@@ -144,13 +144,11 @@ def create_final_url(long_url):
 # ======================= API =======================
 @app.route('/get-key', methods=['GET'])
 def get_key():
-    """Generate new key + URL for user"""
     clean_expired_keys()
     
-    user_ip = request.remote_addr
+    user_ip = get_real_ip()
     now = time.time()
     
-    # 🔥 Custom validity from query param
     try:
         validity_hours = float(request.args.get('hours', DEFAULT_VALIDITY_HOURS))
         if validity_hours < 0.5: validity_hours = 0.5
@@ -158,71 +156,62 @@ def get_key():
     except:
         validity_hours = DEFAULT_VALIDITY_HOURS
     
-    # 🔥 IP LIMIT: Same IP can request max 2 times, then return same key
-    if user_ip in IP_DB:
-        ip_data = IP_DB[user_ip]
-        # Within last 10 minutes
-        if now - ip_data["last_request"] < 600:
-            if ip_data["request_count"] >= 2:
-                # Return existing key for this IP
-                existing_key = ip_data.get("key")
-                if existing_key and existing_key in KEYS_DB:
-                    v = KEYS_DB[existing_key]
-                    validity_sec = v.get("validity_hours", DEFAULT_VALIDITY_HOURS) * 3600
-                    if now - v["created"] < validity_sec:
-                        return jsonify({
-                            "status": "success",
-                            "key": existing_key,
-                            "url": v["url"],
-                            "validity_hours": v.get("validity_hours", DEFAULT_VALIDITY_HOURS),
-                            "expires_in": round((validity_sec - (now - v["created"])) / 3600, 1),
-                            "message": "Existing key returned (request limit reached)"
-                        })
-            ip_data["request_count"] += 1
-            ip_data["last_request"] = now
-        else:
-            ip_data["request_count"] = 1
-            ip_data["last_request"] = now
-    else:
-        IP_DB[user_ip] = {"key": "", "request_count": 1, "last_request": now}
-    
-    # 🔥 Check if IP already has a valid key assigned
+    # 🔥 CHECK IF IP ALREADY HAS A VALID KEY
     for k, v in KEYS_DB.items():
         if user_ip in v.get("ips", []):
             validity_sec = v.get("validity_hours", DEFAULT_VALIDITY_HOURS) * 3600
             if now - v["created"] < validity_sec:
-                IP_DB[user_ip]["key"] = k
                 return jsonify({
                     "status": "success",
                     "key": k,
                     "url": v["url"],
                     "validity_hours": v.get("validity_hours", DEFAULT_VALIDITY_HOURS),
                     "expires_in": round((validity_sec - (now - v["created"])) / 3600, 1),
-                    "message": "Your existing key is still valid!"
+                    "message": "Existing key is still valid for your IP"
                 })
     
+    # 🔥 IP LIMIT CHECK
+    if user_ip in IP_DB:
+        ip_data = IP_DB[user_ip]
+        if now - ip_data["last_request"] < 600 and ip_data["request_count"] >= 2:
+            existing_key = ip_data.get("key")
+            if existing_key and existing_key in KEYS_DB:
+                v = KEYS_DB[existing_key]
+                validity_sec = v.get("validity_hours", DEFAULT_VALIDITY_HOURS) * 3600
+                if now - v["created"] < validity_sec:
+                    return jsonify({
+                        "status": "success",
+                        "key": existing_key,
+                        "url": v["url"],
+                        "validity_hours": v.get("validity_hours", DEFAULT_VALIDITY_HOURS),
+                        "expires_in": round((validity_sec - (now - v["created"])) / 3600, 1),
+                        "message": "Request limit reached, returning existing key"
+                    })
+                else:
+                    del KEYS_DB[existing_key]
+        
+        if now - ip_data["last_request"] < 600:
+            ip_data["request_count"] += 1
+        else:
+            ip_data["request_count"] = 1
+        ip_data["last_request"] = now
+    else:
+        IP_DB[user_ip] = {"key": "", "request_count": 1, "last_request": now}
+    
     try:
-        # 1. Generate random key
         key = random_key()
         
-        # 2. Create text key URL
         text_url = create_text_key(key)
         if not text_url:
             return jsonify({"error": "Text site failed"}), 500
         
-        # 3. EZ4 Shorten
         ez4_url = shorten_ez4(text_url)
-        if ez4_url:
-            final_long = ez4_url
-        else:
-            final_long = text_url
+        final_long = ez4_url if ez4_url else text_url
         
-        # 4. Final URL
         final_url = create_final_url(final_long)
         if not final_url:
             return jsonify({"error": "Final shorten failed"}), 500
         
-        # 5. Save to DB
         KEYS_DB[key] = {
             "url": final_url,
             "created": now,
@@ -244,7 +233,6 @@ def get_key():
 
 @app.route('/verify-key', methods=['POST'])
 def verify_key():
-    """Verify if key is valid"""
     clean_expired_keys()
     
     data = request.json or {}
