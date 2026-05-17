@@ -12,10 +12,8 @@ app = Flask(__name__)
 VALIDITY_SECONDS = 6 * 3600
 
 # APIs
-MRN_API_URL = "https://mrn-bypass-protect-bot-mrn-official.vercel.app/api"
-MRN_API_KEY = "av_botz_X2vlslxmhYiRej3yOhcacwpEGyGH3"
-SAFELINKU_URL = "https://safelinku.com/api/v1/links"
 SAFELINKU_TOKEN = "87be54eb038b2b3fc0b240496c5715b69950f8f7"
+MRN_API_KEY = "av_botz_X2vlslxmhYiRej3yOhcacwpEGyGH3"
 TEXT_SITE = "https://key-genrater.onrender.com"
 
 KEYS_DB = {}
@@ -26,26 +24,34 @@ def random_key(length=8):
 def get_real_ip():
     return request.headers.get('X-Forwarded-For', request.remote_addr).split(',')[0].strip()
 
+def create_text_key(key):
+    try:
+        resp = requests.post(f"{TEXT_SITE}/", data={"text": key}, timeout=30)
+        match = re.search(r'Link:</strong> (https://key-genrater\.onrender\.com/[^<\"]+)', resp.text)
+        return match.group(1) if match else None
+    except:
+        return None
+
 def create_safelinku_url(long_url):
     try:
-        headers = {"Authorization": f"Bearer {SAFELINKU_TOKEN}", "Content-Type": "application/json"}
-        resp = requests.post(SAFELINKU_URL, headers=headers, json={"url": long_url}, timeout=30)
+        headers = {
+            "Authorization": f"Bearer {SAFELINKU_TOKEN}",
+            "Content-Type": "application/json"
+        }
+        resp = requests.post("https://safelinku.com/api/v1/links", headers=headers, json={"url": long_url}, timeout=30)
         return resp.json().get("url")
     except:
         return None
 
 def protect_with_mrn(short_url):
     try:
-        resp = requests.get(MRN_API_URL, params={"api": MRN_API_KEY, "url": short_url}, timeout=30)
-        return resp.json().get("shortenedUrl") or resp.json().get("shortlink")
-    except:
-        return None
-
-def create_text_key(key):
-    try:
-        resp = requests.post(f"{TEXT_SITE}/", data={"text": key}, timeout=30)
-        match = re.search(r'Link:</strong> (https://key-genrater\.onrender\.com/[^<\"]+)', resp.text)
-        return match.group(1) if match else None
+        resp = requests.get(
+            "https://mrn-bypass-protect-bot-mrn-official.vercel.app/api",
+            params={"api": MRN_API_KEY, "url": short_url},
+            timeout=30
+        )
+        data = resp.json()
+        return data.get("shortenedUrl") or data.get("shortlink")
     except:
         return None
 
