@@ -31,7 +31,8 @@ def create_text_key(key):
         resp = requests.post(f"{TEXT_SITE}/", data={"text": key}, timeout=30)
         match = re.search(r'Link:</strong> (https://key-genrater\.onrender\.com/[^<\"]+)', resp.text)
         return match.group(1) if match else None
-    except:
+    except Exception as e:
+        print(f"Text site error: {e}")
         return None
 
 def create_urlshortx_link(long_url):
@@ -42,7 +43,11 @@ def create_urlshortx_link(long_url):
             "url": long_url
         }, timeout=30)
         data = resp.json()
-        return data.get("shortenedUrl")
+        url = data.get("shortenedUrl")
+        if url:
+            # Remove backslashes if any
+            return url.replace("\\", "")
+        return None
     except Exception as e:
         print(f"UrlShortx error: {e}")
         return None
@@ -102,15 +107,15 @@ def get_key():
     if not text_url:
         text_url = f"{TEXT_SITE}/note/{new_key}"
     
-    # Step 2: UrlShortx
+    # Step 2: UrlShortx — REQUIRED
     short_url = create_urlshortx_link(text_url)
     if not short_url:
-        short_url = text_url
+        return jsonify({"error": "UrlShortx failed"}), 500
     
-    # Step 3: MRN Protect
+    # Step 3: MRN Protect — REQUIRED
     final_url = protect_with_mrn(short_url)
     if not final_url:
-        final_url = short_url
+        return jsonify({"error": "MRN failed"}), 500
     
     KEYS_DB[new_key] = {
         "url": final_url,
