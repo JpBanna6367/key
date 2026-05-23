@@ -95,7 +95,11 @@ def get_stats():
     current_time = time.time()
     
     total_keys = len(keys)
-    used_keys = sum(1 for k in keys.values() if k.get("used", False))
+    used_keys = 0
+    for k, v in keys.items():
+        if v.get("used", False):
+            used_keys += 1
+    
     unused_keys = total_keys - used_keys
     
     active_count = 0
@@ -259,7 +263,6 @@ DASHBOARD_HTML = """
         }
         .used { color: #ff4444; }
         .unused { color: #00ff9d; }
-        .status-active { color: #00ff9d; }
         .key-list { max-height: 400px; overflow-y: auto; }
         .device-list { max-height: 400px; overflow-y: auto; }
     </style>
@@ -284,11 +287,11 @@ DASHBOARD_HTML = """
         <div class="section">
             <h2>📱 Active Devices</h2>
             <div class="device-list">
-                <table><th>Device ID</th><th>Script</th><th>Last Seen</th><th>Heartbeats</th></tr>
+                <tr><th>Device ID</th><th>Script</th><th>Last Seen</th><th>Heartbeats</th></tr>
                 {% for device in active_devices %}
                 <tr><td>{{ device.hwid }}</td><td>{{ device.script }}</td><td>{{ device.last_seen }}</td><td>{{ device.heartbeat_count }}</td></tr>
                 {% endfor %}
-                </table>
+            </table>
             </div>
         </div>
         
@@ -342,37 +345,20 @@ def get_key():
     # Initialize user if new
     if hwid not in users:
         users[hwid] = {"used_keys": [], "first_seen": current_time}
+        save_users(users)
     
-    # ===== STEP 1: Check if user already has an unused key assigned =====
-    for key_id, key_data in keys.items():
-        if key_data.get("assigned_to") == hwid and not key_data.get("used", False):
-            if current_time < key_data.get("expiry", 0):
-                return jsonify({
-                    "status": "success",
-                    "key_url": key_data.get("url"),
-                    "expires_in": round((key_data["expiry"] - current_time) / 3600, 1),
-                    "message": "Your existing key (still valid)"
-                })
-    
-    # ===== STEP 2: Find unused key that this user hasn't used before =====
+    # Get list of keys this user has already used
     user_used_keys = users[hwid].get("used_keys", [])
     
+    # ===== FIND UNUSED KEY THAT THIS USER HAS NOT USED BEFORE =====
     for key_id, key_data in keys.items():
-        # Key should be unused and not expired
-        if not key_data.get("used", False) and current_time < key_data.get("expiry", 0):
-            # Check if this user has already used this key
+        # Key should not be expired
+        if current_time < key_data.get("expiry", 0):
+            # Check if user has already used this key
             if key_id not in user_used_keys:
-                # Assign this key to user
-                key_data["assigned_to"] = hwid
-                save_keys(keys)
-                
-                # Update user record
-                if hwid not in users:
-                    users[hwid] = {}
-                if "current_key" not in users[hwid]:
-                    users[hwid]["current_key"] = {}
-                users[hwid]["current_key"]["key"] = key_id
-                users[hwid]["current_key"]["assigned_at"] = current_time
+                # This key is available for this user
+                # Assign to user (store temporarily)
+                users[hwid]["current_key"] = key_id
                 save_users(users)
                 
                 return jsonify({
@@ -382,7 +368,7 @@ def get_key():
                     "message": "Unused key assigned"
                 })
     
-    # ===== STEP 3: Generate new key if no suitable key found =====
+    # ===== GENERATE NEW KEY IF NO SUITABLE KEY FOUND =====
     new_key = generate_random_key()
     
     note_url = create_note_on_site(new_key)
@@ -397,16 +383,12 @@ def get_key():
         "used": False,
         "created_at": current_time,
         "expiry": current_time + KEY_VALIDITY,
-        "url": final_url,
-        "assigned_to": hwid
+        "url": final_url
     }
     save_keys(keys)
     
-    # Update user record
-    users[hwid]["current_key"] = {
-        "key": new_key,
-        "assigned_at": current_time
-    }
+    # Assign to user
+    users[hwid]["current_key"] = new_key
     save_users(users)
     
     return jsonify({
@@ -440,16 +422,10 @@ def verify_key():
     if hwid in users:
         user_used_keys = users[hwid].get("used_keys", [])
         if user_key in user_used_keys:
-            return jsonify({"status": "error", "valid": False, "message": "You have already used this key before"}), 403
+            return jsonify({"status": "error", "valid": False, "message": "You have already used this key"}), 403
     
-    # Mark key as used
-    key_data["used"] = True
-    key_data["used_by_hwid"] = hwid
-    key_data["used_by_script"] = script
-    key_data["used_at"] = current_time
-    save_keys(keys)
-    
-    # Add to user's used keys list
+    # Key is valid for this user
+    # Mark this key as used by this user (but keep key available for others)
     if hwid not in users:
         users[hwid] = {}
     if "used_keys" not in users[hwid]:
@@ -457,7 +433,15 @@ def verify_key():
     if user_key not in users[hwid]["used_keys"]:
         users[hwid]["used_keys"].append(user_key)
     
-    # Clear current key
+    # Also mark in keys database that someone used it (for stats)
+    if "used_by" not in key_data:
+        key_data["used_by"] = []
+    if hwid not in key_data["used_by"]:
+        key_data["used_by"].append(hwid)
+    key_data["used"] = True  # Mark as used for stats
+    save_keys(keys)
+    
+    # Clear current key for this user
     if "current_key" in users[hwid]:
         del users[hwid]["current_key"]
     
@@ -516,7 +500,7 @@ def dashboard():
             "url": v.get("url", ""),
             "used": v.get("used", False),
             "expiry_date": expiry_date,
-            "used_by_hwid": v.get("used_by_hwid", "")
+            "used_by_hwid": ', '.join(v.get("used_by", [])) if v.get("used_by") else ""
         }
     
     return render_template_string(DASHBOARD_HTML, keys=keys_display, stats=stats, active_devices=active_devices)
