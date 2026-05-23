@@ -8,9 +8,7 @@ import time
 import json
 import os
 import hashlib
-import uuid
-import platform
-from datetime import datetime, timedelta
+from datetime import datetime
 
 app = Flask(__name__)
 app.secret_key = "6367824530"
@@ -22,9 +20,9 @@ KEY_VALIDITY = 6 * 3600
 ADMIN_USER = "Jitendar"
 ADMIN_PASS = "Jitendar"
 
-# MRN API
-MRN_API = "https://mrn-bypass-protect-bot-mrn-official.vercel.app/api"
-MRN_KEY = "av_botz_3e8xS90YUZXlSCaLCrXREz9MQgwrt"
+# exe.io API
+EXE_API = "https://exe.io/api"
+EXE_TOKEN = "b71208faade6ab1d34e6f60a5b6f13230b629fb6"
 NOTES_SITE = "https://key-genrater.onrender.com"
 
 # ==================== FILE HANDLERS ====================
@@ -61,42 +59,48 @@ def create_note_on_site(key):
         pass
     return None
 
-def mrn_shorten(url):
+def exe_shorten(url):
+    """Shorten URL using exe.io API directly"""
     try:
-        resp = requests.get(MRN_API, params={"api": MRN_KEY, "url": url}, timeout=30)
-        data = resp.json()
-        return data.get("shortenedUrl") or data.get("shortlink")
-    except:
+        long_url = url
+        api_url = f"{EXE_API}?api={EXE_TOKEN}&url={long_url}"
+        print(f"[EXE] Requesting: {api_url[:100]}...")
+        
+        resp = requests.get(api_url, timeout=30)
+        result = resp.json()
+        
+        print(f"[EXE] Response: {result}")
+        
+        if result.get("status") == "error":
+            print(f"[EXE] Error: {result.get('message')}")
+            return None
+        else:
+            return result.get("shortenedUrl") or result.get("shortlink")
+    except Exception as e:
+        print(f"[EXE] Exception: {e}")
         return None
 
-# ==================== DEVICE LIST FUNCTIONS ====================
-def get_device_list():
-    """Get all devices with their status"""
+# ==================== DEVICE & HEARTBEAT FUNCTIONS ====================
+def get_active_devices():
+    """Get devices active in last 5 minutes"""
     users = load_users()
     current_time = time.time()
-    device_list = []
+    active = []
     
     for hwid, data in users.items():
         last_hb = data.get("last_heartbeat", 0)
-        is_active = (current_time - last_hb) < 600  # 10 minutes = 600 seconds
-        
-        # Format HWID for display
-        display_hwid = hwid[:16] + "..." if len(hwid) > 16 else hwid
-        
-        device_list.append({
-            "hwid": display_hwid,
-            "full_hwid": hwid,
-            "script": data.get("active_script", "unknown"),
-            "last_seen": datetime.fromtimestamp(last_hb).strftime("%Y-%m-%d %H:%M:%S") if last_hb else "Never",
-            "is_active": is_active,
-            "first_seen": datetime.fromtimestamp(data.get("first_seen", 0)).strftime("%Y-%m-%d %H:%M") if data.get("first_seen") else "Unknown",
-            "heartbeat_count": data.get("heartbeat_count", 0),
-            "key_used": data.get("used_key", False)
-        })
-    
-    # Sort: active devices first, then by last seen
-    device_list.sort(key=lambda x: (not x["is_active"], x["last_seen"]), reverse=False)
-    return device_list
+        # 5 minutes = 300 seconds
+        if current_time - last_hb < 300:
+            active.append({
+                "hwid": hwid[:16] + "..." if len(hwid) > 16 else hwid,
+                "full_hwid": hwid,
+                "script": data.get("active_script", "unknown"),
+                "last_seen": datetime.fromtimestamp(last_hb).strftime("%H:%M:%S"),
+                "heartbeat_count": data.get("heartbeat_count", 0)
+            })
+    # Sort by last seen (most recent first)
+    active.sort(key=lambda x: x["last_seen"], reverse=True)
+    return active
 
 def get_stats():
     keys = load_keys()
@@ -107,10 +111,10 @@ def get_stats():
     used_keys = sum(1 for k in keys.values() if k.get("used", False))
     unused_keys = total_keys - used_keys
     
-    # Active devices (last 10 minutes)
+    # Active devices (last 5 minutes)
     active_count = 0
     for hwid, data in users.items():
-        if current_time - data.get("last_heartbeat", 0) < 600:
+        if current_time - data.get("last_heartbeat", 0) < 300:
             active_count += 1
     
     # Keys generated today
@@ -272,10 +276,8 @@ DASHBOARD_HTML = """
         }
         .used { color: #ff4444; }
         .unused { color: #00ff9d; }
-        .active { color: #00ff9d; font-weight: bold; }
-        .inactive { color: #888; }
         .status-active { color: #00ff9d; }
-        .status-inactive { color: #ff4444; }
+        .status-inactive { color: #888; }
         .key-list { max-height: 400px; overflow-y: auto; }
         .device-list { max-height: 400px; overflow-y: auto; }
     </style>
@@ -302,7 +304,7 @@ DASHBOARD_HTML = """
             </div>
             <div class="stat-card">
                 <h3>{{ stats.active_devices }}</h3>
-                <p>🟢 Active Now (10 min)</p>
+                <p>🟢 Active Now (5 min)</p>
             </div>
             <div class="stat-card">
                 <h3>{{ stats.total_devices }}</h3>
@@ -319,28 +321,27 @@ DASHBOARD_HTML = """
         </div>
         
         <div class="section">
-            <h2>📱 Device List ({{ device_list|length }} devices)</h2>
+            <h2>📱 Active Devices (Last 5 minutes)</h2>
             <div class="device-list">
                 <table>
                     <tr>
                         <th>Device ID</th>
                         <th>Script</th>
-                        <th>Status</th>
                         <th>Last Seen</th>
-                        <th>First Seen</th>
                         <th>Heartbeats</th>
                     </tr>
-                    {% for device in device_list %}
+                    {% for device in active_devices %}
                     <tr>
                         <td title="{{ device.full_hwid }}">{{ device.hwid }}</td>
                         <td>{{ device.script }}</td>
-                        <td>{% if device.is_active %}<span class="status-active">🟢 Active</span>{% else %}<span class="status-inactive">🔴 Offline</span>{% endif %}</td>
                         <td>{{ device.last_seen }}</td>
-                        <td>{{ device.first_seen }}</td>
                         <td>{{ device.heartbeat_count }}</td>
                     </tr>
                     {% endfor %}
                 </table>
+                {% if not active_devices %}
+                <p style="color:#888; text-align:center;">No active devices</p>
+                {% endif %}
             </div>
         </div>
         
@@ -428,11 +429,14 @@ def get_key():
     # Generate new if needed
     if not unused_key:
         unused_key = generate_random_key()
+        
+        # Create note on key-genrater site
         note_url = create_note_on_site(unused_key)
         if not note_url:
             note_url = f"{NOTES_SITE}/note/{unused_key}"
         
-        final_url = mrn_shorten(note_url)
+        # Shorten with exe.io
+        final_url = exe_shorten(note_url)
         if not final_url:
             final_url = note_url
         
@@ -499,7 +503,7 @@ def verify_key():
 
 @app.route('/heartbeat', methods=['POST'])
 def heartbeat():
-    """Receive heartbeat from bot every 10 minutes"""
+    """Receive heartbeat from bot every 5 minutes"""
     data = request.json or {}
     hwid = data.get('hwid')
     script = data.get('script', 'unknown')
@@ -543,7 +547,7 @@ def dashboard():
     
     keys = load_keys()
     stats = get_stats()
-    device_list = get_device_list()
+    active_devices = get_active_devices()
     
     # Format keys for display
     keys_display = {}
@@ -556,7 +560,7 @@ def dashboard():
             "used_by_hwid": v.get("used_by_hwid", "")
         }
     
-    return render_template_string(DASHBOARD_HTML, keys=keys_display, stats=stats, device_list=device_list)
+    return render_template_string(DASHBOARD_HTML, keys=keys_display, stats=stats, active_devices=active_devices)
 
 @app.route('/admin/generate', methods=['POST'])
 def admin_generate():
@@ -570,7 +574,7 @@ def admin_generate():
     for _ in range(count):
         new_key = generate_random_key()
         note_url = create_note_on_site(new_key)
-        final_url = mrn_shorten(note_url) if note_url else None
+        final_url = exe_shorten(note_url) if note_url else None
         
         keys[new_key] = {
             "used": False,
