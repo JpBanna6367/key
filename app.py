@@ -16,7 +16,7 @@ app.secret_key = "6367824530"
 # ==================== CONFIG ====================
 KEYS_FILE = "keys.json"
 USERS_FILE = "users.json"
-KEY_VALIDITY = 6 * 3600
+ACCESS_HOURS = 6
 ADMIN_USER = "Jitendar"
 ADMIN_PASS = "Jitendar"
 
@@ -71,65 +71,157 @@ def exe_shorten(url):
     except:
         return None
 
-# ==================== ACTIVE DEVICES ====================
-def get_active_devices():
-    users = load_users()
-    current_time = time.time()
-    active = []
-    
-    for hwid, data in users.items():
-        last_hb = data.get("last_heartbeat", 0)
-        if current_time - last_hb < 300:
-            active.append({
-                "hwid": hwid[:16] + "..." if len(hwid) > 16 else hwid,
-                "full_hwid": hwid,
-                "script": data.get("active_script", "unknown"),
-                "last_seen": datetime.fromtimestamp(last_hb).strftime("%H:%M:%S"),
-                "heartbeat_count": data.get("heartbeat_count", 0)
-            })
-    return active
+# ==================== MAIN API ====================
+@app.route('/')
+def home():
+    return jsonify({"service": "Key Generator", "status": "running"})
 
-def get_stats():
+@app.route('/get-key', methods=['GET', 'POST'])
+def get_key():
+    if request.method == 'GET':
+        hwid = request.args.get('hwid')
+        script = request.args.get('script', 'default')
+    else:
+        data = request.json or {}
+        hwid = data.get('hwid')
+        script = data.get('script', 'default')
+    
+    if not hwid:
+        return jsonify({"status": "error", "message": "HWID required"}), 400
+    
+    users = load_users()
+    keys = load_keys()
+    current_time = time.time()
+    
+    # ===== STEP 1: Check if user already has ACTIVE access =====
+    if hwid in users:
+        user_data = users[hwid]
+        if user_data.get("access_until", 0) > current_time:
+            # User still has access, return same key
+            current_key = user_data.get("current_key")
+            if current_key and current_key in keys:
+                key_data = keys[current_key]
+                return jsonify({
+                    "status": "success",
+                    "key_url": key_data.get("url"),
+                    "expires_in": round((user_data["access_until"] - current_time) / 3600, 1),
+                    "message": "Your current key (still active)"
+                })
+    
+    # ===== STEP 2: Find key that this user has NOT used =====
+    user_used_keys = users.get(hwid, {}).get("used_keys", [])
+    
+    for key_id, key_data in keys.items():
+        if key_id not in user_used_keys:
+            # This key is available for this user
+            # Assign to user
+            if hwid not in users:
+                users[hwid] = {}
+            
+            users[hwid]["current_key"] = key_id
+            users[hwid]["access_until"] = current_time + (ACCESS_HOURS * 3600)
+            users[hwid]["used_keys"] = user_used_keys + [key_id]
+            save_users(users)
+            
+            return jsonify({
+                "status": "success",
+                "key_url": key_data.get("url"),
+                "expires_in_hours": ACCESS_HOURS,
+                "message": "Existing key assigned"
+            })
+    
+    # ===== STEP 3: User has used ALL keys, generate new =====
+    new_key = generate_random_key()
+    
+    # Create note
+    note_url = create_note_on_site(new_key)
+    if not note_url:
+        note_url = f"{NOTES_SITE}/note/{new_key}"
+    
+    # Shorten with exe.io
+    final_url = exe_shorten(note_url)
+    if not final_url:
+        final_url = note_url
+    
+    # Save key
+    keys[new_key] = {
+        "url": final_url,
+        "created_at": current_time,
+        "used_by": []
+    }
+    save_keys(keys)
+    
+    # Assign to user
+    if hwid not in users:
+        users[hwid] = {}
+    
+    users[hwid]["current_key"] = new_key
+    users[hwid]["access_until"] = current_time + (ACCESS_HOURS * 3600)
+    users[hwid]["used_keys"] = user_used_keys + [new_key]
+    save_users(users)
+    
+    return jsonify({
+        "status": "success",
+        "key_url": final_url,
+        "expires_in_hours": ACCESS_HOURS,
+        "message": "New key generated"
+    })
+
+@app.route('/verify-key', methods=['POST'])
+def verify_key():
+    data = request.json or {}
+    user_key = data.get("key", "").strip()
+    hwid = data.get("hwid")
+    script = data.get("script", "default")
+    
     keys = load_keys()
     users = load_users()
     current_time = time.time()
     
-    total_keys = len(keys)
-    used_keys = 0
-    for k, v in keys.items():
-        if v.get("used", False):
-            used_keys += 1
+    if user_key not in keys:
+        return jsonify({"status": "error", "valid": False, "message": "Invalid key"}), 404
     
-    unused_keys = total_keys - used_keys
+    key_data = keys[user_key]
     
-    active_count = 0
-    for hwid, data in users.items():
-        if current_time - data.get("last_heartbeat", 0) < 300:
-            active_count += 1
+    # Mark this key as used by this user
+    if hwid not in key_data.get("used_by", []):
+        key_data["used_by"].append(hwid)
+        save_keys(keys)
     
-    today_keys = 0
-    for k, v in keys.items():
-        if v.get("created_at", 0) > current_time - 86400:
-            today_keys += 1
+    # Update user's used keys
+    if hwid not in users:
+        users[hwid] = {}
     
-    week_keys = 0
-    for k, v in keys.items():
-        if v.get("created_at", 0) > current_time - (7 * 86400):
-            week_keys += 1
+    if user_key not in users[hwid].get("used_keys", []):
+        users[hwid]["used_keys"] = users[hwid].get("used_keys", []) + [user_key]
+        save_users(users)
     
-    total_devices = len(users)
-    
-    return {
-        "total_keys": total_keys,
-        "used_keys": used_keys,
-        "unused_keys": unused_keys,
-        "active_devices": active_count,
-        "total_devices": total_devices,
-        "today_keys": today_keys,
-        "week_keys": week_keys
-    }
+    return jsonify({"status": "success", "valid": True, "message": "Key verified!"})
 
-# ==================== ADMIN DASHBOARD HTML ====================
+@app.route('/heartbeat', methods=['POST'])
+def heartbeat():
+    data = request.json or {}
+    hwid = data.get('hwid')
+    script = data.get('script', 'unknown')
+    
+    if not hwid:
+        return jsonify({"status": "error", "message": "HWID required"}), 400
+    
+    users = load_users()
+    current_time = time.time()
+    
+    if hwid not in users:
+        users[hwid] = {}
+    
+    users[hwid]["last_heartbeat"] = current_time
+    users[hwid]["active_script"] = script
+    users[hwid]["heartbeat_count"] = users[hwid].get("heartbeat_count", 0) + 1
+    
+    save_users(users)
+    
+    return jsonify({"status": "success", "timestamp": current_time})
+
+# ==================== ADMIN ROUTES ====================
 LOGIN_PAGE = """
 <!DOCTYPE html>
 <html>
@@ -217,7 +309,7 @@ DASHBOARD_HTML = """
         }
         .stats-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            grid-template-columns: repeat(4, 1fr);
             gap: 20px;
             margin-bottom: 30px;
         }
@@ -228,24 +320,23 @@ DASHBOARD_HTML = """
             text-align: center;
         }
         .stat-card h3 { font-size: 32px; color: #00ff9d; }
-        .stat-card p { color: #888; font-size: 14px; }
         .section {
             background: rgba(255,255,255,0.05);
             padding: 20px;
             border-radius: 15px;
             margin-bottom: 20px;
         }
-        .section h2 { color: #00ff9d; margin-bottom: 15px; border-left: 3px solid #00ff9d; padding-left: 15px; }
+        .section h2 { color: #00ff9d; margin-bottom: 15px; }
         table {
             width: 100%;
             border-collapse: collapse;
         }
         th, td {
-            padding: 12px;
+            padding: 10px;
             text-align: left;
             border-bottom: 1px solid rgba(255,255,255,0.1);
         }
-        th { background: rgba(0,255,157,0.2); color: #00ff9d; }
+        th { background: rgba(0,255,157,0.2); }
         .btn {
             background: #00ff9d;
             color: black;
@@ -261,10 +352,7 @@ DASHBOARD_HTML = """
             color: white;
             border-radius: 5px;
         }
-        .used { color: #ff4444; }
-        .unused { color: #00ff9d; }
         .key-list { max-height: 400px; overflow-y: auto; }
-        .device-list { max-height: 400px; overflow-y: auto; }
     </style>
 </head>
 <body>
@@ -276,23 +364,9 @@ DASHBOARD_HTML = """
         
         <div class="stats-grid">
             <div class="stat-card"><h3>{{ stats.total_keys }}</h3><p>Total Keys</p></div>
-            <div class="stat-card"><h3>{{ stats.used_keys }}</h3><p>Used Keys</p></div>
-            <div class="stat-card"><h3>{{ stats.unused_keys }}</h3><p>Unused Keys</p></div>
-            <div class="stat-card"><h3>{{ stats.active_devices }}</h3><p>🟢 Active Now</p></div>
-            <div class="stat-card"><h3>{{ stats.total_devices }}</h3><p>Total Devices</p></div>
-            <div class="stat-card"><h3>{{ stats.today_keys }}</h3><p>Keys Today</p></div>
-            <div class="stat-card"><h3>{{ stats.week_keys }}</h3><p>Keys This Week</p></div>
-        </div>
-        
-        <div class="section">
-            <h2>📱 Active Devices</h2>
-            <div class="device-list">
-                <tr><th>Device ID</th><th>Script</th><th>Last Seen</th><th>Heartbeats</th></tr>
-                {% for device in active_devices %}
-                <tr><td>{{ device.hwid }}</td><td>{{ device.script }}</td><td>{{ device.last_seen }}</td><td>{{ device.heartbeat_count }}</td></tr>
-                {% endfor %}
-            </table>
-            </div>
+            <div class="stat-card"><h3>{{ stats.active_users }}</h3><p>Active Users</p></div>
+            <div class="stat-card"><h3>{{ stats.total_users }}</h3><p>Total Users</p></div>
+            <div class="stat-card"><h3>{{ stats.heartbeats }}</h3><p>Heartbeats (24h)</p></div>
         </div>
         
         <div class="section">
@@ -306,173 +380,40 @@ DASHBOARD_HTML = """
         <div class="section">
             <h2>📋 All Keys</h2>
             <div class="key-list">
-                <table><th>Key</th><th>URL</th><th>Status</th><th>Expiry</th><th>Used By</th></tr>
-                {% for key, data in keys.items() %}
-                <tr><td>{{ key }}</td><td><a href="{{ data.url }}">Link</a></td>
-                <td class="{% if data.used %}used{% else %}unused{% endif %}">{% if data.used %}USED{% else %}UNUSED{% endif %}</td>
-                <td>{{ data.expiry_date }}</td><td>{{ data.used_by_hwid or '-' }}</td></tr>
+                <table>
+                    <tr><th>Key</th><th>URL</th><th>Used By (HWID)</th><th>Users Count</th></tr>
+                    {% for key, data in keys.items() %}
+                    <tr>
+                        <td>{{ key }}</td>
+                        <td><a href="{{ data.url }}" target="_blank" style="color:#00ff9d;">Link</a></td>
+                        <td style="font-size:11px;">{{ data.used_by|join(', ') }}</td>
+                        <td>{{ data.used_by|length }}</td>
+                    </tr>
+                    {% endfor %}
+                </table>
+            </div>
+        </div>
+        
+        <div class="section">
+            <h2>👥 Active Users</h2>
+            <table>
+                <tr><th>HWID</th><th>Current Key</th><th>Access Until</th><th>Script</th><th>Heartbeats</th></tr>
+                {% for hwid, data in users.items() %}
+                <tr>
+                    <td>{{ hwid[:16] }}...</td>
+                    <td>{{ data.get('current_key', '-') }}</td>
+                    <td>{{ data.get('access_until_str', '-') }}</td>
+                    <td>{{ data.get('active_script', '-') }}</td>
+                    <td>{{ data.get('heartbeat_count', 0) }}</td>
+                </tr>
                 {% endfor %}
             </table>
-            </div>
         </div>
     </div>
 </body>
 </html>
 """
 
-# ==================== MAIN API ====================
-@app.route('/')
-def home():
-    return jsonify({"service": "Key Generator", "status": "running"})
-
-@app.route('/get-key', methods=['GET', 'POST'])
-def get_key():
-    if request.method == 'GET':
-        hwid = request.args.get('hwid')
-        script = request.args.get('script', 'default')
-    else:
-        data = request.json or {}
-        hwid = data.get('hwid')
-        script = data.get('script', 'default')
-    
-    if not hwid:
-        return jsonify({"status": "error", "message": "HWID required"}), 400
-    
-    users = load_users()
-    keys = load_keys()
-    current_time = time.time()
-    
-    # Initialize user if new
-    if hwid not in users:
-        users[hwid] = {"used_keys": [], "first_seen": current_time}
-        save_users(users)
-    
-    # Get list of keys this user has already used
-    user_used_keys = users[hwid].get("used_keys", [])
-    
-    # ===== FIND UNUSED KEY THAT THIS USER HAS NOT USED BEFORE =====
-    for key_id, key_data in keys.items():
-        # Key should not be expired
-        if current_time < key_data.get("expiry", 0):
-            # Check if user has already used this key
-            if key_id not in user_used_keys:
-                # This key is available for this user
-                # Assign to user (store temporarily)
-                users[hwid]["current_key"] = key_id
-                save_users(users)
-                
-                return jsonify({
-                    "status": "success",
-                    "key_url": key_data.get("url"),
-                    "expires_in": round((key_data["expiry"] - current_time) / 3600, 1),
-                    "message": "Unused key assigned"
-                })
-    
-    # ===== GENERATE NEW KEY IF NO SUITABLE KEY FOUND =====
-    new_key = generate_random_key()
-    
-    note_url = create_note_on_site(new_key)
-    if not note_url:
-        note_url = f"{NOTES_SITE}/note/{new_key}"
-    
-    final_url = exe_shorten(note_url)
-    if not final_url:
-        final_url = note_url
-    
-    keys[new_key] = {
-        "used": False,
-        "created_at": current_time,
-        "expiry": current_time + KEY_VALIDITY,
-        "url": final_url
-    }
-    save_keys(keys)
-    
-    # Assign to user
-    users[hwid]["current_key"] = new_key
-    save_users(users)
-    
-    return jsonify({
-        "status": "success",
-        "key_url": final_url,
-        "expires_in_hours": 6,
-        "message": "New key generated"
-    })
-
-@app.route('/verify-key', methods=['POST'])
-def verify_key():
-    data = request.json or {}
-    user_key = data.get("key", "").strip()
-    hwid = data.get("hwid")
-    script = data.get("script", "default")
-    
-    keys = load_keys()
-    users = load_users()
-    current_time = time.time()
-    
-    if user_key not in keys:
-        return jsonify({"status": "error", "valid": False, "message": "Invalid key"}), 404
-    
-    key_data = keys[user_key]
-    
-    # Check if expired
-    if current_time > key_data.get("expiry", 0):
-        return jsonify({"status": "error", "valid": False, "message": "Key expired"}), 403
-    
-    # Check if this user has already used this key
-    if hwid in users:
-        user_used_keys = users[hwid].get("used_keys", [])
-        if user_key in user_used_keys:
-            return jsonify({"status": "error", "valid": False, "message": "You have already used this key"}), 403
-    
-    # Key is valid for this user
-    # Mark this key as used by this user (but keep key available for others)
-    if hwid not in users:
-        users[hwid] = {}
-    if "used_keys" not in users[hwid]:
-        users[hwid]["used_keys"] = []
-    if user_key not in users[hwid]["used_keys"]:
-        users[hwid]["used_keys"].append(user_key)
-    
-    # Also mark in keys database that someone used it (for stats)
-    if "used_by" not in key_data:
-        key_data["used_by"] = []
-    if hwid not in key_data["used_by"]:
-        key_data["used_by"].append(hwid)
-    key_data["used"] = True  # Mark as used for stats
-    save_keys(keys)
-    
-    # Clear current key for this user
-    if "current_key" in users[hwid]:
-        del users[hwid]["current_key"]
-    
-    save_users(users)
-    
-    return jsonify({"status": "success", "valid": True, "message": "Key verified!"})
-
-@app.route('/heartbeat', methods=['POST'])
-def heartbeat():
-    data = request.json or {}
-    hwid = data.get('hwid')
-    script = data.get('script', 'unknown')
-    
-    if not hwid:
-        return jsonify({"status": "error", "message": "HWID required"}), 400
-    
-    users = load_users()
-    current_time = time.time()
-    
-    if hwid not in users:
-        users[hwid] = {"used_keys": [], "first_seen": current_time}
-    
-    users[hwid]["last_heartbeat"] = current_time
-    users[hwid]["active_script"] = script
-    users[hwid]["heartbeat_count"] = users[hwid].get("heartbeat_count", 0) + 1
-    
-    save_users(users)
-    
-    return jsonify({"status": "success", "timestamp": current_time})
-
-# ==================== ADMIN ROUTES ====================
 @app.route('/admin', methods=['GET', 'POST'])
 def admin_login():
     if request.method == 'POST':
@@ -490,20 +431,45 @@ def dashboard():
         return redirect('/admin')
     
     keys = load_keys()
-    stats = get_stats()
-    active_devices = get_active_devices()
+    users = load_users()
+    current_time = time.time()
     
+    # Calculate stats
+    active_users = 0
+    heartbeats_24h = 0
+    
+    for hwid, data in users.items():
+        if data.get("access_until", 0) > current_time:
+            active_users += 1
+        if data.get("last_heartbeat", 0) > current_time - 86400:
+            heartbeats_24h += 1
+    
+    # Format keys for display
     keys_display = {}
     for k, v in keys.items():
-        expiry_date = datetime.fromtimestamp(v.get("expiry", 0)).strftime("%Y-%m-%d %H:%M") if v.get("expiry") else "N/A"
         keys_display[k] = {
             "url": v.get("url", ""),
-            "used": v.get("used", False),
-            "expiry_date": expiry_date,
-            "used_by_hwid": ', '.join(v.get("used_by", [])) if v.get("used_by") else ""
+            "used_by": v.get("used_by", [])
         }
     
-    return render_template_string(DASHBOARD_HTML, keys=keys_display, stats=stats, active_devices=active_devices)
+    # Format users for display
+    users_display = {}
+    for hwid, data in users.items():
+        users_display[hwid] = {
+            "current_key": data.get("current_key", "-"),
+            "access_until_str": datetime.fromtimestamp(data.get("access_until", 0)).strftime("%Y-%m-%d %H:%M") if data.get("access_until") else "-",
+            "active_script": data.get("active_script", "-"),
+            "heartbeat_count": data.get("heartbeat_count", 0)
+        }
+    
+    stats = {
+        "total_keys": len(keys),
+        "active_users": active_users,
+        "total_users": len(users),
+        "heartbeats": heartbeats_24h
+    }
+    
+    return render_template_string(DASHBOARD_HTML, keys=keys_display, users=users_display, stats=stats)
 
 @app.route('/admin/generate', methods=['POST'])
 def admin_generate():
@@ -520,10 +486,9 @@ def admin_generate():
         final_url = exe_shorten(note_url) if note_url else None
         
         keys[new_key] = {
-            "used": False,
+            "url": final_url,
             "created_at": current_time,
-            "expiry": current_time + KEY_VALIDITY,
-            "url": final_url
+            "used_by": []
         }
     
     save_keys(keys)
