@@ -62,35 +62,26 @@ def create_note_on_site(key):
 def exe_shorten(url):
     """Shorten URL using exe.io API directly"""
     try:
-        long_url = url
-        api_url = f"{EXE_API}?api={EXE_TOKEN}&url={long_url}"
-        print(f"[EXE] Requesting: {api_url[:100]}...")
-        
+        api_url = f"{EXE_API}?api={EXE_TOKEN}&url={url}"
         resp = requests.get(api_url, timeout=30)
         result = resp.json()
         
-        print(f"[EXE] Response: {result}")
-        
         if result.get("status") == "error":
-            print(f"[EXE] Error: {result.get('message')}")
             return None
         else:
             return result.get("shortenedUrl") or result.get("shortlink")
-    except Exception as e:
-        print(f"[EXE] Exception: {e}")
+    except:
         return None
 
 # ==================== DEVICE & HEARTBEAT FUNCTIONS ====================
 def get_active_devices():
-    """Get devices active in last 5 minutes"""
     users = load_users()
     current_time = time.time()
     active = []
     
     for hwid, data in users.items():
         last_hb = data.get("last_heartbeat", 0)
-        # 5 minutes = 300 seconds
-        if current_time - last_hb < 300:
+        if current_time - last_hb < 300:  # 5 minutes
             active.append({
                 "hwid": hwid[:16] + "..." if len(hwid) > 16 else hwid,
                 "full_hwid": hwid,
@@ -98,7 +89,6 @@ def get_active_devices():
                 "last_seen": datetime.fromtimestamp(last_hb).strftime("%H:%M:%S"),
                 "heartbeat_count": data.get("heartbeat_count", 0)
             })
-    # Sort by last seen (most recent first)
     active.sort(key=lambda x: x["last_seen"], reverse=True)
     return active
 
@@ -111,25 +101,21 @@ def get_stats():
     used_keys = sum(1 for k in keys.values() if k.get("used", False))
     unused_keys = total_keys - used_keys
     
-    # Active devices (last 5 minutes)
     active_count = 0
     for hwid, data in users.items():
         if current_time - data.get("last_heartbeat", 0) < 300:
             active_count += 1
     
-    # Keys generated today
     today_keys = 0
     for k, v in keys.items():
         if v.get("created_at", 0) > current_time - 86400:
             today_keys += 1
     
-    # Keys generated last 7 days
     week_keys = 0
     for k, v in keys.items():
         if v.get("created_at", 0) > current_time - (7 * 86400):
             week_keys += 1
     
-    # Total devices
     total_devices = len(users)
     
     return {
@@ -290,64 +276,30 @@ DASHBOARD_HTML = """
         </div>
         
         <div class="stats-grid">
-            <div class="stat-card">
-                <h3>{{ stats.total_keys }}</h3>
-                <p>Total Keys</p>
-            </div>
-            <div class="stat-card">
-                <h3>{{ stats.used_keys }}</h3>
-                <p>Used Keys</p>
-            </div>
-            <div class="stat-card">
-                <h3>{{ stats.unused_keys }}</h3>
-                <p>Unused Keys</p>
-            </div>
-            <div class="stat-card">
-                <h3>{{ stats.active_devices }}</h3>
-                <p>🟢 Active Now (5 min)</p>
-            </div>
-            <div class="stat-card">
-                <h3>{{ stats.total_devices }}</h3>
-                <p>Total Devices</p>
-            </div>
-            <div class="stat-card">
-                <h3>{{ stats.today_keys }}</h3>
-                <p>Keys Today</p>
-            </div>
-            <div class="stat-card">
-                <h3>{{ stats.week_keys }}</h3>
-                <p>Keys This Week</p>
-            </div>
+            <div class="stat-card"><h3>{{ stats.total_keys }}</h3><p>Total Keys</p></div>
+            <div class="stat-card"><h3>{{ stats.used_keys }}</h3><p>Used Keys</p></div>
+            <div class="stat-card"><h3>{{ stats.unused_keys }}</h3><p>Unused Keys</p></div>
+            <div class="stat-card"><h3>{{ stats.active_devices }}</h3><p>🟢 Active Now (5 min)</p></div>
+            <div class="stat-card"><h3>{{ stats.total_devices }}</h3><p>Total Devices</p></div>
+            <div class="stat-card"><h3>{{ stats.today_keys }}</h3><p>Keys Today</p></div>
+            <div class="stat-card"><h3>{{ stats.week_keys }}</h3><p>Keys This Week</p></div>
         </div>
         
         <div class="section">
             <h2>📱 Active Devices (Last 5 minutes)</h2>
             <div class="device-list">
-                <table>
-                    <tr>
-                        <th>Device ID</th>
-                        <th>Script</th>
-                        <th>Last Seen</th>
-                        <th>Heartbeats</th>
-                    </tr>
-                    {% for device in active_devices %}
-                    <tr>
-                        <td title="{{ device.full_hwid }}">{{ device.hwid }}</td>
-                        <td>{{ device.script }}</td>
-                        <td>{{ device.last_seen }}</td>
-                        <td>{{ device.heartbeat_count }}</td>
-                    </tr>
-                    {% endfor %}
+                <table><th>Device ID</th><th>Script</th><th>Last Seen</th><th>Heartbeats</th></tr>
+                {% for device in active_devices %}
+                <tr><td>{{ device.hwid }}</td><td>{{ device.script }}</td><td>{{ device.last_seen }}</td><td>{{ device.heartbeat_count }}</td></tr>
+                {% endfor %}
                 </table>
-                {% if not active_devices %}
-                <p style="color:#888; text-align:center;">No active devices</p>
-                {% endif %}
+                {% if not active_devices %}<p style="color:#888; text-align:center;">No active devices</p>{% endif %}
             </div>
         </div>
         
         <div class="section">
             <h2>➕ Generate New Keys</h2>
-            <form method="POST" action="/admin/generate" style="display: flex; gap: 10px; align-items: center;">
+            <form method="POST" action="/admin/generate" style="display: flex; gap: 10px;">
                 <input type="number" name="count" value="5" style="width: 100px;">
                 <button type="submit" class="btn">Generate Keys</button>
             </form>
@@ -356,23 +308,12 @@ DASHBOARD_HTML = """
         <div class="section">
             <h2>📋 All Keys</h2>
             <div class="key-list">
-                <table>
-                    <tr>
-                        <th>Key</th>
-                        <th>URL</th>
-                        <th>Status</th>
-                        <th>Expiry</th>
-                        <th>Used By</th>
-                    </tr>
-                    {% for key, data in keys.items() %}
-                    <tr>
-                        <td class="key-cell">{{ key }}</td>
-                        <td><a href="{{ data.url }}" target="_blank" style="color:#00ff9d;">Link</a></td>
-                        <td class="{% if data.used %}used{% else %}unused{% endif %}">{% if data.used %}USED{% else %}UNUSED{% endif %}</td>
-                        <td>{{ data.expiry_date }}</td>
-                        <td>{{ data.used_by_hwid or '-' }}</td>
-                    </tr>
-                    {% endfor %}
+                <table><tr><th>Key</th><th>URL</th><th>Status</th><th>Expiry</th><th>Used By HWID</th></tr>
+                {% for key, data in keys.items() %}
+                <tr><td>{{ key }}</td><td><a href="{{ data.url }}" target="_blank">Link</a></td>
+                <td class="{% if data.used %}used{% else %}unused{% endif %}">{% if data.used %}USED{% else %}UNUSED{% endif %}</td>
+                <td>{{ data.expiry_date }}</td><td>{{ data.used_by_hwid or '-' }}</td></tr>
+                {% endfor %}
                 </table>
             </div>
         </div>
@@ -381,7 +322,7 @@ DASHBOARD_HTML = """
 </html>
 """
 
-# ==================== API ROUTES ====================
+# ==================== MAIN API ROUTES ====================
 @app.route('/')
 def home():
     return jsonify({"service": "Key Generator", "status": "running"})
@@ -403,64 +344,87 @@ def get_key():
     keys = load_keys()
     current_time = time.time()
     
-    # Update user first_seen
-    if hwid not in users:
-        users[hwid] = {"first_seen": current_time}
-    
-    # Check existing key for this HWID + Script
-    if script in users[hwid]:
+    # ===== CHECK IF THIS HWID ALREADY HAS A KEY (AND USED IT) =====
+    if hwid in users and script in users[hwid]:
         existing_key = users[hwid][script].get("key")
         if existing_key and existing_key in keys:
             key_info = keys[existing_key]
-            if current_time < key_info.get("expiry", 0) and not key_info.get("used", False):
-                return jsonify({
-                    "status": "success",
-                    "key_url": key_info.get("url"),
-                    "expires_in": round((key_info["expiry"] - current_time) / 3600, 1)
-                })
+            # Agar key used hai toh is HWID ko naya key do
+            if key_info.get("used", False):
+                # Used key hai, is HWID ko naya key milega (age jaake generate)
+                pass
+            else:
+                # Key unused hai, is HWID ko wahi key URL do (jo already assign hai)
+                if current_time < key_info.get("expiry", 0):
+                    return jsonify({
+                        "status": "success",
+                        "key_url": key_info.get("url"),
+                        "expires_in": round((key_info["expiry"] - current_time) / 3600, 1),
+                        "message": "Your existing key (still valid)"
+                    })
     
-    # Find unused key
+    # ===== FIND UNUSED KEY (PRIORITY - kisi ko bhi de sakte ho) =====
     unused_key = None
     for k, v in keys.items():
         if not v.get("used", False):
             unused_key = k
             break
     
-    # Generate new if needed
-    if not unused_key:
-        unused_key = generate_random_key()
+    # ===== IF UNUSED KEY EXISTS, RETURN IT =====
+    if unused_key:
+        key_info = keys[unused_key]
         
-        # Create note on key-genrater site
-        note_url = create_note_on_site(unused_key)
-        if not note_url:
-            note_url = f"{NOTES_SITE}/note/{unused_key}"
+        # Store this key assignment for this HWID
+        if hwid not in users:
+            users[hwid] = {}
+        if script not in users[hwid]:
+            users[hwid][script] = {}
+        users[hwid][script]["key"] = unused_key
+        users[hwid][script]["assigned_at"] = current_time
+        save_users(users)
         
-        # Shorten with exe.io
-        final_url = exe_shorten(note_url)
-        if not final_url:
-            final_url = note_url
-        
-        keys[unused_key] = {
-            "used": False,
-            "created_at": current_time,
-            "expiry": current_time + KEY_VALIDITY,
-            "url": final_url
-        }
-        save_keys(keys)
+        return jsonify({
+            "status": "success",
+            "key_url": key_info.get("url"),
+            "expires_in": round((key_info["expiry"] - current_time) / 3600, 1),
+            "message": "Unused key assigned"
+        })
     
-    # Assign key to this HWID + Script
+    # ===== GENERATE NEW KEY IF NO UNUSED KEYS =====
+    new_key = generate_random_key()
+    
+    # Create note on key-genrater site
+    note_url = create_note_on_site(new_key)
+    if not note_url:
+        note_url = f"{NOTES_SITE}/note/{new_key}"
+    
+    # Shorten with exe.io
+    final_url = exe_shorten(note_url)
+    if not final_url:
+        final_url = note_url
+    
+    keys[new_key] = {
+        "used": False,
+        "created_at": current_time,
+        "expiry": current_time + KEY_VALIDITY,
+        "url": final_url
+    }
+    save_keys(keys)
+    
+    # Assign to this HWID
+    if hwid not in users:
+        users[hwid] = {}
     if script not in users[hwid]:
         users[hwid][script] = {}
-    
-    users[hwid][script]["key"] = unused_key
+    users[hwid][script]["key"] = new_key
     users[hwid][script]["assigned_at"] = current_time
-    
     save_users(users)
     
     return jsonify({
         "status": "success",
-        "key_url": keys[unused_key]["url"],
-        "expires_in_hours": 6
+        "key_url": final_url,
+        "expires_in_hours": 6,
+        "message": "New key generated"
     })
 
 @app.route('/verify-key', methods=['POST'])
@@ -471,7 +435,6 @@ def verify_key():
     script = data.get("script", "default")
     
     keys = load_keys()
-    users = load_users()
     current_time = time.time()
     
     if user_key not in keys:
@@ -479,9 +442,11 @@ def verify_key():
     
     key_data = keys[user_key]
     
+    # Check if already used
     if key_data.get("used", False):
         return jsonify({"status": "error", "valid": False, "message": "Key already used"}), 403
     
+    # Check if expired
     if current_time > key_data.get("expiry", 0):
         return jsonify({"status": "error", "valid": False, "message": "Key expired"}), 403
     
@@ -491,19 +456,12 @@ def verify_key():
     key_data["used_by_script"] = script
     key_data["used_at"] = current_time
     
-    # Update user record
-    if hwid in users:
-        users[hwid]["used_key"] = True
-        users[hwid]["used_key_value"] = user_key
-    
     save_keys(keys)
-    save_users(users)
     
     return jsonify({"status": "success", "valid": True})
 
 @app.route('/heartbeat', methods=['POST'])
 def heartbeat():
-    """Receive heartbeat from bot every 5 minutes"""
     data = request.json or {}
     hwid = data.get('hwid')
     script = data.get('script', 'unknown')
@@ -515,10 +473,7 @@ def heartbeat():
     current_time = time.time()
     
     if hwid not in users:
-        users[hwid] = {
-            "first_seen": current_time,
-            "heartbeat_count": 0
-        }
+        users[hwid] = {"first_seen": current_time, "heartbeat_count": 0}
     
     users[hwid]["last_heartbeat"] = current_time
     users[hwid]["active_script"] = script
@@ -549,7 +504,6 @@ def dashboard():
     stats = get_stats()
     active_devices = get_active_devices()
     
-    # Format keys for display
     keys_display = {}
     for k, v in keys.items():
         expiry_date = datetime.fromtimestamp(v.get("expiry", 0)).strftime("%Y-%m-%d %H:%M") if v.get("expiry") else "N/A"
