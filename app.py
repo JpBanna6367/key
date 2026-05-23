@@ -13,7 +13,8 @@ app = Flask(__name__)
 # ==================== CONFIG ====================
 KEYS_FILE = "keys.json"
 USERS_FILE = "users.json"
-BLOCK_TIME = 10 * 60
+BLOCK_TIME = 10 * 60  # 10 minutes background (user ko nahi pata)
+KEY_VALIDITY = 6 * 3600  # 6 hours (user ko show hoga)
 
 # MRN API
 MRN_API = "https://mrn-bypass-protect-bot-mrn-official.vercel.app/api"
@@ -46,7 +47,6 @@ def generate_random_key():
     return ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
 
 def create_note_on_site(key):
-    """Create note on key-genrater site"""
     try:
         resp = requests.post(f"{NOTES_SITE}/api/create", 
                             json={"text": key}, timeout=30)
@@ -75,14 +75,33 @@ def get_key():
     users = load_users()
     keys = load_keys()
     
-    # Check if user is blocked
+    # Check if user has an active key (6 hours validity)
+    current_time = time.time()
+    
     if user_ip in users:
         user_data = users[user_ip]
-        if time.time() < user_data.get("block_until", 0):
-            return jsonify({
-                "status": "error",
-                "message": f"Wait {int((user_data['block_until'] - time.time()) / 60)} minutes"
-            }), 403
+        key_assigned = user_data.get("assigned_key")
+        
+        if key_assigned and key_assigned in keys:
+            key_info = keys[key_assigned]
+            
+            # Check if key is still valid (6 hours) and not used
+            if not key_info.get("used") and current_time < key_info.get("expiry", 0):
+                # Key still valid, return same key URL
+                return jsonify({
+                    "status": "success",
+                    "key_url": key_info["url"],
+                    "expires_in_hours": round((key_info["expiry"] - current_time) / 3600, 1),
+                    "message": "Your key is still active"
+                })
+    
+    # Check background block (10 minutes - user ko nahi pata)
+    if user_ip in users:
+        user_data = users[user_ip]
+        if current_time < user_data.get("block_until", 0):
+            # Background block active - but user doesn't see this
+            # Just generate new key anyway
+            pass
     
     # Find unused key
     unused_key = None
@@ -108,21 +127,19 @@ def get_key():
         
         keys[unused_key] = {
             "used": False,
-            "created_at": time.time(),
+            "created_at": current_time,
+            "expiry": current_time + KEY_VALIDITY,  # 6 hours expiry
             "url": final_url,
             "note_url": note_url
         }
     
-    # Check if key has URL
-    if not keys[unused_key].get("url"):
-        return jsonify({"status": "error", "message": "Failed to generate key URL"}), 500
-    
-    # Update user
+    # Assign key to user
     if user_ip not in users:
         users[user_ip] = {}
     
-    users[user_ip]["last_key"] = unused_key
-    users[user_ip]["block_until"] = time.time() + BLOCK_TIME
+    users[user_ip]["assigned_key"] = unused_key
+    users[user_ip]["block_until"] = current_time + BLOCK_TIME  # Background block
+    users[user_ip]["last_assigned"] = current_time
     
     save_keys(keys)
     save_users(users)
@@ -130,7 +147,8 @@ def get_key():
     return jsonify({
         "status": "success",
         "key_url": keys[unused_key]["url"],
-        "message": "Open this URL to get your key"
+        "expires_in_hours": 6,
+        "message": "Key valid for 6 hours"
     })
 
 @app.route('/verify-key', methods=['POST'])
@@ -147,8 +165,13 @@ def verify_key():
     
     key_data = keys[user_key]
     
+    # Check if key already used
     if key_data.get("used", False):
         return jsonify({"status": "error", "valid": False, "message": "Key already used"}), 403
+    
+    # Check if key expired (6 hours)
+    if time.time() > key_data.get("expiry", 0):
+        return jsonify({"status": "error", "valid": False, "message": "Key expired (6 hours)"}), 403
     
     # Mark as used
     key_data["used"] = True
