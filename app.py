@@ -93,11 +93,11 @@ def get_key():
     keys = load_keys()
     current_time = time.time()
     
-    # ===== STEP 1: Check if user already has ACTIVE access =====
+    # ===== CHECK IF USER ALREADY HAS ACTIVE ACCESS =====
     if hwid in users:
         user_data = users[hwid]
         if user_data.get("access_until", 0) > current_time:
-            # User still has access, return same key
+            # User still has access, return same key URL
             current_key = user_data.get("current_key")
             if current_key and current_key in keys:
                 key_data = keys[current_key]
@@ -108,19 +108,19 @@ def get_key():
                     "message": "Your current key (still active)"
                 })
     
-    # ===== STEP 2: Find key that this user has NOT used =====
+    # ===== FIND KEY THAT THIS USER HAS NOT USED =====
     user_used_keys = users.get(hwid, {}).get("used_keys", [])
     
     for key_id, key_data in keys.items():
         if key_id not in user_used_keys:
-            # This key is available for this user
-            # Assign to user
+            # Assign this key to user
             if hwid not in users:
                 users[hwid] = {}
             
             users[hwid]["current_key"] = key_id
             users[hwid]["access_until"] = current_time + (ACCESS_HOURS * 3600)
             users[hwid]["used_keys"] = user_used_keys + [key_id]
+            users[hwid]["active_script"] = script
             save_users(users)
             
             return jsonify({
@@ -130,20 +130,17 @@ def get_key():
                 "message": "Existing key assigned"
             })
     
-    # ===== STEP 3: User has used ALL keys, generate new =====
+    # ===== GENERATE NEW KEY =====
     new_key = generate_random_key()
     
-    # Create note
     note_url = create_note_on_site(new_key)
     if not note_url:
         note_url = f"{NOTES_SITE}/note/{new_key}"
     
-    # Shorten with exe.io
     final_url = exe_shorten(note_url)
     if not final_url:
         final_url = note_url
     
-    # Save key
     keys[new_key] = {
         "url": final_url,
         "created_at": current_time,
@@ -158,6 +155,7 @@ def get_key():
     users[hwid]["current_key"] = new_key
     users[hwid]["access_until"] = current_time + (ACCESS_HOURS * 3600)
     users[hwid]["used_keys"] = user_used_keys + [new_key]
+    users[hwid]["active_script"] = script
     save_users(users)
     
     return jsonify({
@@ -188,13 +186,17 @@ def verify_key():
         key_data["used_by"].append(hwid)
         save_keys(keys)
     
-    # Update user's used keys
+    # Update user's used keys and access
     if hwid not in users:
         users[hwid] = {}
     
     if user_key not in users[hwid].get("used_keys", []):
         users[hwid]["used_keys"] = users[hwid].get("used_keys", []) + [user_key]
-        save_users(users)
+    
+    users[hwid]["access_until"] = current_time + (ACCESS_HOURS * 3600)
+    users[hwid]["current_key"] = user_key
+    users[hwid]["active_script"] = script
+    save_users(users)
     
     return jsonify({"status": "success", "valid": True, "message": "Key verified!"})
 
@@ -221,7 +223,7 @@ def heartbeat():
     
     return jsonify({"status": "success", "timestamp": current_time})
 
-# ==================== ADMIN ROUTES ====================
+# ==================== ADMIN DASHBOARD ====================
 LOGIN_PAGE = """
 <!DOCTYPE html>
 <html>
@@ -353,6 +355,9 @@ DASHBOARD_HTML = """
             border-radius: 5px;
         }
         .key-list { max-height: 400px; overflow-y: auto; }
+        .user-list { max-height: 400px; overflow-y: auto; }
+        .status-active { color: #00ff9d; }
+        .status-inactive { color: #ff4444; }
     </style>
 </head>
 <body>
@@ -364,7 +369,7 @@ DASHBOARD_HTML = """
         
         <div class="stats-grid">
             <div class="stat-card"><h3>{{ stats.total_keys }}</h3><p>Total Keys</p></div>
-            <div class="stat-card"><h3>{{ stats.active_users }}</h3><p>Active Users</p></div>
+            <div class="stat-card"><h3>{{ stats.active_users }}</h3><p>🟢 Active Users</p></div>
             <div class="stat-card"><h3>{{ stats.total_users }}</h3><p>Total Users</p></div>
             <div class="stat-card"><h3>{{ stats.heartbeats }}</h3><p>Heartbeats (24h)</p></div>
         </div>
@@ -395,19 +400,35 @@ DASHBOARD_HTML = """
         </div>
         
         <div class="section">
-            <h2>👥 Active Users</h2>
-            <table>
-                <tr><th>HWID</th><th>Current Key</th><th>Access Until</th><th>Script</th><th>Heartbeats</th></tr>
-                {% for hwid, data in users.items() %}
-                <tr>
-                    <td>{{ hwid[:16] }}...</td>
-                    <td>{{ data.get('current_key', '-') }}</td>
-                    <td>{{ data.get('access_until_str', '-') }}</td>
-                    <td>{{ data.get('active_script', '-') }}</td>
-                    <td>{{ data.get('heartbeat_count', 0) }}</td>
-                </tr>
-                {% endfor %}
-            </table>
+            <h2>👥 User List ({{ users|length }} users)</h2>
+            <div class="user-list">
+                <table style="width:100%">
+                    <thead>
+                        <tr>
+                            <th>HWID</th>
+                            <th>Current Key</th>
+                            <th>Script</th>
+                            <th>Access Until</th>
+                            <th>Status</th>
+                            <th>Last Heartbeat</th>
+                            <th>Heartbeats</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for hwid, data in users.items() %}
+                        <tr>
+                            <td style="font-family:monospace; font-size:11px;">{{ hwid[:20] }}...</td>
+                            <td>{{ data.get('current_key', '-') }}</td>
+                            <td><span class="status-active">{{ data.get('active_script', 'unknown') }}</span></td>
+                            <td>{{ data.get('access_until_str', '-') }}</td>
+                            <td>{% if data.get('access_until', 0) > current_time %}<span class="status-active">🟢 Active</span>{% else %}<span class="status-inactive">🔴 Expired</span>{% endif %}</td>
+                            <td>{{ data.get('last_heartbeat_str', '-') }}</td>
+                            <td>{{ data.get('heartbeat_count', 0) }}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
         </div>
     </div>
 </body>
@@ -444,7 +465,7 @@ def dashboard():
         if data.get("last_heartbeat", 0) > current_time - 86400:
             heartbeats_24h += 1
     
-    # Format keys for display
+    # Format keys
     keys_display = {}
     for k, v in keys.items():
         keys_display[k] = {
@@ -452,13 +473,15 @@ def dashboard():
             "used_by": v.get("used_by", [])
         }
     
-    # Format users for display
+    # Format users
     users_display = {}
     for hwid, data in users.items():
         users_display[hwid] = {
             "current_key": data.get("current_key", "-"),
+            "active_script": data.get("active_script", "unknown"),
             "access_until_str": datetime.fromtimestamp(data.get("access_until", 0)).strftime("%Y-%m-%d %H:%M") if data.get("access_until") else "-",
-            "active_script": data.get("active_script", "-"),
+            "access_until": data.get("access_until", 0),
+            "last_heartbeat_str": datetime.fromtimestamp(data.get("last_heartbeat", 0)).strftime("%Y-%m-%d %H:%M") if data.get("last_heartbeat") else "-",
             "heartbeat_count": data.get("heartbeat_count", 0)
         }
     
@@ -469,7 +492,7 @@ def dashboard():
         "heartbeats": heartbeats_24h
     }
     
-    return render_template_string(DASHBOARD_HTML, keys=keys_display, users=users_display, stats=stats)
+    return render_template_string(DASHBOARD_HTML, keys=keys_display, users=users_display, stats=stats, current_time=current_time)
 
 @app.route('/admin/generate', methods=['POST'])
 def admin_generate():
