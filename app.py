@@ -17,6 +17,7 @@ app.secret_key = "6367824530"
 # ==================== CONFIG ====================
 KEYS_FILE = "keys.json"
 USERS_FILE = "users.json"
+COUNTER_FILE = "counter.json"
 ACCESS_HOURS = 6
 ADMIN_USER = "Jitendar"
 ADMIN_PASS = "Jitendar"
@@ -40,6 +41,23 @@ COOKIES = {
 }
 
 # ==================== FILE HANDLERS ====================
+def load_counter():
+    if os.path.exists(COUNTER_FILE):
+        with open(COUNTER_FILE, 'r') as f:
+            return json.load(f)
+    return {"count": 0}
+
+def save_counter(counter):
+    with open(COUNTER_FILE, 'w') as f:
+        json.dump(counter, f)
+
+def get_next_key_number():
+    """Get next key number: 1, 2, 3..."""
+    counter = load_counter()
+    counter["count"] = counter.get("count", 0) + 1
+    save_counter(counter)
+    return counter["count"]
+
 def load_keys():
     if os.path.exists(KEYS_FILE):
         with open(KEYS_FILE, 'r') as f:
@@ -63,9 +81,12 @@ def save_users(users):
 def generate_random_key():
     return ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
 
-def upload_to_up4ever(key_content, filename):
-    """Upload key to Up4ever - returns download URL"""
+def upload_to_up4ever(key_content, file_number):
+    """Upload key to Up4ever - filename: key1.txt, key2.txt..."""
     session = requests.Session()
+    
+    # ✅ Fixed filename format: key1.txt, key2.txt, key3.txt...
+    filename = f"key{file_number}.txt"
     
     try:
         # Step 1: PUT file
@@ -84,7 +105,7 @@ def upload_to_up4ever(key_content, filename):
         )
         
         if resp.json().get("status") != "OK":
-            print(f"[✗] PUT failed: {resp.text}")
+            print(f"[✗] PUT failed for {filename}: {resp.text}")
             return None
         
         # Step 2: Import file
@@ -112,14 +133,14 @@ def upload_to_up4ever(key_content, filename):
         if result.get("status") == "OK":
             file_code = result.get("file_code")
             download_url = f"{BASE_URL}/{file_code}"
-            print(f"[✓] Uploaded: {filename} -> {download_url}")
+            print(f"[✓] {filename} -> {download_url}")
             return download_url
         
-        print(f"[✗] Import failed: {resp.text}")
+        print(f"[✗] Import failed for {filename}: {resp.text}")
         return None
         
     except Exception as e:
-        print(f"[✗] Upload error: {e}")
+        print(f"[✗] Error uploading {filename}: {e}")
         return None
 
 # ==================== MAIN API ====================
@@ -179,22 +200,21 @@ def get_key():
                 "message": "Existing key assigned"
             })
     
-    # ===== GENERATE NEW KEY + UPLOAD TO UP4EVER =====
+    # ===== GENERATE NEW KEY + UPLOAD =====
     new_key = generate_random_key()
-    filename = f"{new_key}.txt"
+    file_number = get_next_key_number()  # Auto increment: 1,2,3...
     
-    # Upload to Up4ever
-    key_url = upload_to_up4ever(new_key, filename)
+    # Upload with filename: key1.txt, key2.txt...
+    key_url = upload_to_up4ever(new_key, file_number)
     
     if not key_url:
-        return jsonify({
-            "status": "error",
-            "message": "Failed to upload key"
-        }), 500
+        return jsonify({"status": "error", "message": "Failed to upload"}), 500
     
     # Save key
     keys[new_key] = {
         "url": key_url,
+        "file_number": file_number,
+        "filename": f"key{file_number}.txt",
         "created_at": current_time,
         "used_by": []
     }
@@ -213,8 +233,9 @@ def get_key():
     return jsonify({
         "status": "success",
         "key_url": key_url,
+        "key_number": file_number,
         "expires_in_hours": ACCESS_HOURS,
-        "message": "New key uploaded to Up4ever"
+        "message": f"Key uploaded as key{file_number}.txt"
     })
 
 @app.route('/verify-key', methods=['POST'])
@@ -284,35 +305,21 @@ LOGIN_PAGE = """
     <style>
         body {
             background: linear-gradient(135deg, #0a0a1a, #1a1a3a);
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            height: 100vh;
-            font-family: Arial;
+            display: flex; justify-content: center; align-items: center;
+            height: 100vh; font-family: Arial;
         }
         .login-box {
-            background: rgba(255,255,255,0.1);
-            padding: 40px;
-            border-radius: 20px;
-            width: 300px;
+            background: rgba(255,255,255,0.1); padding: 40px;
+            border-radius: 20px; width: 300px;
         }
         input {
-            width: 100%;
-            padding: 10px;
-            margin: 10px 0;
-            background: rgba(255,255,255,0.2);
-            border: 1px solid #00ff9d;
-            color: white;
-            border-radius: 5px;
+            width: 100%; padding: 10px; margin: 10px 0;
+            background: rgba(255,255,255,0.2); border: 1px solid #00ff9d;
+            color: white; border-radius: 5px;
         }
         button {
-            width: 100%;
-            padding: 10px;
-            background: #00ff9d;
-            color: black;
-            border: none;
-            border-radius: 5px;
-            cursor: pointer;
+            width: 100%; padding: 10px; background: #00ff9d;
+            color: black; border: none; border-radius: 5px; cursor: pointer;
         }
         h2 { color: #00ff9d; text-align: center; }
     </style>
@@ -338,78 +345,22 @@ DASHBOARD_HTML = """
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            background: linear-gradient(135deg, #0a0a1a, #1a1a3a);
-            color: white;
-            font-family: 'Segoe UI', Arial;
-            padding: 20px;
-        }
+        body { background: linear-gradient(135deg, #0a0a1a, #1a1a3a); color: white; font-family: Arial; padding: 20px; }
         .container { max-width: 1400px; margin: 0 auto; }
-        .header {
-            background: linear-gradient(135deg, #00ff9d, #00bfff);
-            padding: 20px;
-            border-radius: 15px;
-            margin-bottom: 20px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
+        .header { background: linear-gradient(135deg, #00ff9d, #00bfff); padding: 20px; border-radius: 15px; margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center; }
         .header h1 { color: black; }
-        .logout-btn {
-            background: #ff4444;
-            padding: 10px 20px;
-            border-radius: 10px;
-            text-decoration: none;
-            color: white;
-        }
-        .stats-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-            gap: 20px;
-            margin-bottom: 30px;
-        }
-        .stat-card {
-            background: rgba(255,255,255,0.1);
-            padding: 20px;
-            border-radius: 15px;
-            text-align: center;
-        }
+        .logout-btn { background: #ff4444; padding: 10px 20px; border-radius: 10px; text-decoration: none; color: white; }
+        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 20px; margin-bottom: 30px; }
+        .stat-card { background: rgba(255,255,255,0.1); padding: 20px; border-radius: 15px; text-align: center; }
         .stat-card h3 { font-size: 32px; color: #00ff9d; }
-        .section {
-            background: rgba(255,255,255,0.05);
-            padding: 20px;
-            border-radius: 15px;
-            margin-bottom: 20px;
-        }
+        .section { background: rgba(255,255,255,0.05); padding: 20px; border-radius: 15px; margin-bottom: 20px; }
         .section h2 { color: #00ff9d; margin-bottom: 15px; }
-        table {
-            width: 100%;
-            border-collapse: collapse;
-        }
-        th, td {
-            padding: 10px;
-            text-align: left;
-            border-bottom: 1px solid rgba(255,255,255,0.1);
-        }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { padding: 10px; text-align: left; border-bottom: 1px solid rgba(255,255,255,0.1); }
         th { background: rgba(0,255,157,0.2); }
-        .btn {
-            background: #00ff9d;
-            color: black;
-            padding: 8px 16px;
-            border: none;
-            border-radius: 8px;
-            cursor: pointer;
-        }
-        input {
-            background: rgba(255,255,255,0.1);
-            border: 1px solid #00ff9d;
-            padding: 8px;
-            color: white;
-            border-radius: 5px;
-            width: 100px;
-        }
-        .key-list { max-height: 400px; overflow-y: auto; }
-        .user-list { max-height: 400px; overflow-y: auto; }
+        .btn { background: #00ff9d; color: black; padding: 8px 16px; border: none; border-radius: 8px; cursor: pointer; }
+        input { background: rgba(255,255,255,0.1); border: 1px solid #00ff9d; padding: 8px; color: white; border-radius: 5px; width: 100px; }
+        .key-list, .user-list { max-height: 400px; overflow-y: auto; }
         .status-active { color: #00ff9d; }
         .status-inactive { color: #ff4444; }
         a { color: #00ff9d; }
@@ -442,12 +393,13 @@ DASHBOARD_HTML = """
             <h2>📋 All Keys ({{ keys|length }})</h2>
             <div class="key-list">
                 <table>
-                    <tr><th>Key</th><th>Up4ever URL</th><th>Used By</th><th>Users</th></tr>
+                    <tr><th>Key</th><th>File #</th><th>Filename</th><th>Up4ever URL</th><th>Users</th></tr>
                     {% for key, data in keys.items() %}
                     <tr>
                         <td>{{ key }}</td>
-                        <td><a href="{{ data.url }}" target="_blank">{{ data.url[:50] }}...</a></td>
-                        <td style="font-size:11px;">{{ data.used_by[:3]|join(', ') }}{% if data.used_by|length > 3 %}...{% endif %}</td>
+                        <td>#{{ data.get('file_number', '?') }}</td>
+                        <td>{{ data.get('filename', '?') }}</td>
+                        <td><a href="{{ data.url }}" target="_blank">{{ data.url[:45] }}...</a></td>
                         <td>{{ data.used_by|length }}</td>
                     </tr>
                     {% endfor %}
@@ -498,14 +450,8 @@ def dashboard():
     users = load_users()
     current_time = time.time()
     
-    active_users = 0
-    heartbeats_24h = 0
-    
-    for hwid, data in users.items():
-        if data.get("access_until", 0) > current_time:
-            active_users += 1
-        if data.get("last_heartbeat", 0) > current_time - 86400:
-            heartbeats_24h += 1
+    active_users = sum(1 for d in users.values() if d.get("access_until", 0) > current_time)
+    heartbeats_24h = sum(1 for d in users.values() if d.get("last_heartbeat", 0) > current_time - 86400)
     
     users_display = {}
     for hwid, data in users.items():
@@ -535,21 +481,20 @@ def admin_generate():
     keys = load_keys()
     current_time = time.time()
     
-    uploaded = 0
-    for i in range(count):
+    for _ in range(count):
         new_key = generate_random_key()
-        filename = f"key_{new_key}.txt"
+        file_number = get_next_key_number()
         
-        # Upload to Up4ever
-        key_url = upload_to_up4ever(new_key, filename)
+        key_url = upload_to_up4ever(new_key, file_number)
         
         if key_url:
             keys[new_key] = {
                 "url": key_url,
+                "file_number": file_number,
+                "filename": f"key{file_number}.txt",
                 "created_at": current_time,
                 "used_by": []
             }
-            uploaded += 1
     
     save_keys(keys)
     return redirect('/dashboard')
