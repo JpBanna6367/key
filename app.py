@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# 🦅 KEY GENERATOR + UP4EVER UPLOAD SERVER
 
 from flask import Flask, request, jsonify, render_template_string, session, redirect
 import requests
@@ -7,7 +8,7 @@ import string
 import time
 import json
 import os
-import hashlib
+import re
 from datetime import datetime
 
 app = Flask(__name__)
@@ -20,10 +21,23 @@ ACCESS_HOURS = 6
 ADMIN_USER = "Jitendar"
 ADMIN_PASS = "Jitendar"
 
-# exe.io API
-EXE_API = "https://exe.io/api"
-EXE_TOKEN = "b71208faade6ab1d34e6f60a5b6f13230b629fb6"
-NOTES_SITE = "https://key-genrater.onrender.com"
+# Up4ever Config
+SESS_ID = "yy2tn7laj2uzm7xa"
+SID = "686591040774"
+UPLOAD_HOST = "https://s13.up4ever.download"
+BASE_URL = "https://www.up-4ever.net"
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Linux; Android 15) Chrome/148.0",
+    "Origin": BASE_URL,
+    "X-Requested-With": "Banna.com",
+    "Referer": f"{BASE_URL}/upload/",
+}
+
+COOKIES = {
+    "xfss": SESS_ID,
+    "login": "jitendar123bana",
+}
 
 # ==================== FILE HANDLERS ====================
 def load_keys():
@@ -49,32 +63,69 @@ def save_users(users):
 def generate_random_key():
     return ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
 
-def create_note_on_site(key):
+def upload_to_up4ever(key_content, filename):
+    """Upload key to Up4ever - returns download URL"""
+    session = requests.Session()
+    
     try:
-        resp = requests.post(f"{NOTES_SITE}/api/create", 
-                            json={"text": key}, timeout=30)
-        if resp.status_code == 200:
-            return resp.json().get("url")
-    except:
-        pass
-    return None
-
-def exe_shorten(url):
-    try:
-        api_url = f"{EXE_API}?api={EXE_TOKEN}&url={url}"
-        resp = requests.get(api_url, timeout=30)
-        result = resp.json()
-        if result.get("status") == "error":
+        # Step 1: PUT file
+        put_headers = HEADERS.copy()
+        put_headers.update({
+            "Content-Type": "application/octet-stream",
+            "X-Upload-SID": SID,
+        })
+        
+        resp = session.put(
+            f"{UPLOAD_HOST}/cgi-bin/put_chunk.cgi",
+            data=key_content.encode(),
+            headers=put_headers,
+            cookies=COOKIES,
+            timeout=30
+        )
+        
+        if resp.json().get("status") != "OK":
+            print(f"[✗] PUT failed: {resp.text}")
             return None
-        else:
-            return result.get("shortenedUrl") or result.get("shortlink")
-    except:
+        
+        # Step 2: Import file
+        post_url = f"{UPLOAD_HOST}/cgi-bin/api.cgi"
+        post_data = {
+            "op": "import_file",
+            "sid": SID,
+            "fname": filename,
+            "sess_id": SESS_ID,
+            "utype": "reg",
+            "link_rcpt": "",
+            "link_pass": "",
+            "to_folder": "",
+            "tos": "",
+            "file_descr": "",
+            "file_public": "1"
+        }
+        
+        post_headers = HEADERS.copy()
+        post_headers["Content-Type"] = "application/x-www-form-urlencoded; charset=UTF-8"
+        
+        resp = session.post(post_url, data=post_data, headers=post_headers, cookies=COOKIES, timeout=30)
+        result = resp.json()
+        
+        if result.get("status") == "OK":
+            file_code = result.get("file_code")
+            download_url = f"{BASE_URL}/{file_code}"
+            print(f"[✓] Uploaded: {filename} -> {download_url}")
+            return download_url
+        
+        print(f"[✗] Import failed: {resp.text}")
+        return None
+        
+    except Exception as e:
+        print(f"[✗] Upload error: {e}")
         return None
 
 # ==================== MAIN API ====================
 @app.route('/')
 def home():
-    return jsonify({"service": "Key Generator", "status": "running"})
+    return jsonify({"service": "Key Generator + Up4ever", "status": "running"})
 
 @app.route('/get-key', methods=['GET', 'POST'])
 def get_key():
@@ -97,23 +148,21 @@ def get_key():
     if hwid in users:
         user_data = users[hwid]
         if user_data.get("access_until", 0) > current_time:
-            # User still has access, return same key URL
             current_key = user_data.get("current_key")
             if current_key and current_key in keys:
                 key_data = keys[current_key]
                 return jsonify({
                     "status": "success",
                     "key_url": key_data.get("url"),
-                    "expires_in": round((user_data["access_until"] - current_time) / 3600, 1),
+                    "expires_in_hours": round((user_data["access_until"] - current_time) / 3600, 1),
                     "message": "Your current key (still active)"
                 })
     
-    # ===== FIND KEY THAT THIS USER HAS NOT USED =====
+    # ===== FIND EXISTING UNUSED KEY =====
     user_used_keys = users.get(hwid, {}).get("used_keys", [])
     
     for key_id, key_data in keys.items():
-        if key_id not in user_used_keys:
-            # Assign this key to user
+        if key_id not in user_used_keys and key_data.get("url"):
             if hwid not in users:
                 users[hwid] = {}
             
@@ -130,19 +179,22 @@ def get_key():
                 "message": "Existing key assigned"
             })
     
-    # ===== GENERATE NEW KEY =====
+    # ===== GENERATE NEW KEY + UPLOAD TO UP4EVER =====
     new_key = generate_random_key()
+    filename = f"{new_key}.txt"
     
-    note_url = create_note_on_site(new_key)
-    if not note_url:
-        note_url = f"{NOTES_SITE}/note/{new_key}"
+    # Upload to Up4ever
+    key_url = upload_to_up4ever(new_key, filename)
     
-    final_url = exe_shorten(note_url)
-    if not final_url:
-        final_url = note_url
+    if not key_url:
+        return jsonify({
+            "status": "error",
+            "message": "Failed to upload key"
+        }), 500
     
+    # Save key
     keys[new_key] = {
-        "url": final_url,
+        "url": key_url,
         "created_at": current_time,
         "used_by": []
     }
@@ -160,9 +212,9 @@ def get_key():
     
     return jsonify({
         "status": "success",
-        "key_url": final_url,
+        "key_url": key_url,
         "expires_in_hours": ACCESS_HOURS,
-        "message": "New key generated"
+        "message": "New key uploaded to Up4ever"
     })
 
 @app.route('/verify-key', methods=['POST'])
@@ -181,22 +233,21 @@ def verify_key():
     
     key_data = keys[user_key]
     
-    # Mark this key as used by this user
-    if hwid not in key_data.get("used_by", []):
+    if hwid and hwid not in key_data.get("used_by", []):
         key_data["used_by"].append(hwid)
         save_keys(keys)
     
-    # Update user's used keys and access
-    if hwid not in users:
-        users[hwid] = {}
-    
-    if user_key not in users[hwid].get("used_keys", []):
-        users[hwid]["used_keys"] = users[hwid].get("used_keys", []) + [user_key]
-    
-    users[hwid]["access_until"] = current_time + (ACCESS_HOURS * 3600)
-    users[hwid]["current_key"] = user_key
-    users[hwid]["active_script"] = script
-    save_users(users)
+    if hwid:
+        if hwid not in users:
+            users[hwid] = {}
+        
+        if user_key not in users[hwid].get("used_keys", []):
+            users[hwid]["used_keys"] = users[hwid].get("used_keys", []) + [user_key]
+        
+        users[hwid]["access_until"] = current_time + (ACCESS_HOURS * 3600)
+        users[hwid]["current_key"] = user_key
+        users[hwid]["active_script"] = script
+        save_users(users)
     
     return jsonify({"status": "success", "valid": True, "message": "Key verified!"})
 
@@ -229,6 +280,7 @@ LOGIN_PAGE = """
 <html>
 <head>
     <title>Admin Login</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
         body {
             background: linear-gradient(135deg, #0a0a1a, #1a1a3a);
@@ -267,7 +319,7 @@ LOGIN_PAGE = """
 </head>
 <body>
     <div class="login-box">
-        <h2>Admin Login</h2>
+        <h2>🦅 Admin Login</h2>
         <form method="POST">
             <input type="text" name="username" placeholder="Username" required>
             <input type="password" name="password" placeholder="Password" required>
@@ -283,6 +335,7 @@ DASHBOARD_HTML = """
 <html>
 <head>
     <title>Admin Dashboard</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -311,7 +364,7 @@ DASHBOARD_HTML = """
         }
         .stats-grid {
             display: grid;
-            grid-template-columns: repeat(4, 1fr);
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
             gap: 20px;
             margin-bottom: 30px;
         }
@@ -353,45 +406,48 @@ DASHBOARD_HTML = """
             padding: 8px;
             color: white;
             border-radius: 5px;
+            width: 100px;
         }
         .key-list { max-height: 400px; overflow-y: auto; }
         .user-list { max-height: 400px; overflow-y: auto; }
         .status-active { color: #00ff9d; }
         .status-inactive { color: #ff4444; }
+        a { color: #00ff9d; }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
-            <h1>🔑 Key Generator Admin</h1>
+            <h1>🦅 Key Generator + Up4ever</h1>
             <a href="/logout" class="logout-btn">Logout</a>
         </div>
         
         <div class="stats-grid">
             <div class="stat-card"><h3>{{ stats.total_keys }}</h3><p>Total Keys</p></div>
-            <div class="stat-card"><h3>{{ stats.active_users }}</h3><p>🟢 Active Users</p></div>
-            <div class="stat-card"><h3>{{ stats.total_users }}</h3><p>Total Users</p></div>
-            <div class="stat-card"><h3>{{ stats.heartbeats }}</h3><p>Heartbeats (24h)</p></div>
+            <div class="stat-card"><h3>{{ stats.active_users }}</h3><p>🟢 Active</p></div>
+            <div class="stat-card"><h3>{{ stats.total_users }}</h3><p>Users</p></div>
+            <div class="stat-card"><h3>{{ stats.heartbeats }}</h3><p>Heartbeats(24h)</p></div>
         </div>
         
         <div class="section">
-            <h2>➕ Generate New Keys</h2>
-            <form method="POST" action="/admin/generate" style="display: flex; gap: 10px;">
-                <input type="number" name="count" value="5" style="width: 100px;">
-                <button type="submit" class="btn">Generate Keys</button>
+            <h2>➕ Generate & Upload Keys</h2>
+            <form method="POST" action="/admin/generate" style="display: flex; gap: 10px; align-items: center;">
+                <input type="number" name="count" value="5" min="1" max="50">
+                <span>keys</span>
+                <button type="submit" class="btn">Generate & Upload</button>
             </form>
         </div>
         
         <div class="section">
-            <h2>📋 All Keys</h2>
+            <h2>📋 All Keys ({{ keys|length }})</h2>
             <div class="key-list">
                 <table>
-                    <tr><th>Key</th><th>URL</th><th>Used By (HWID)</th><th>Users Count</th></tr>
+                    <tr><th>Key</th><th>Up4ever URL</th><th>Used By</th><th>Users</th></tr>
                     {% for key, data in keys.items() %}
                     <tr>
                         <td>{{ key }}</td>
-                        <td><a href="{{ data.url }}" target="_blank" style="color:#00ff9d;">Link</a></td>
-                        <td style="font-size:11px;">{{ data.used_by|join(', ') }}</td>
+                        <td><a href="{{ data.url }}" target="_blank">{{ data.url[:50] }}...</a></td>
+                        <td style="font-size:11px;">{{ data.used_by[:3]|join(', ') }}{% if data.used_by|length > 3 %}...{% endif %}</td>
                         <td>{{ data.used_by|length }}</td>
                     </tr>
                     {% endfor %}
@@ -400,33 +456,20 @@ DASHBOARD_HTML = """
         </div>
         
         <div class="section">
-            <h2>👥 User List ({{ users|length }} users)</h2>
+            <h2>👥 Users ({{ users|length }})</h2>
             <div class="user-list">
-                <table style="width:100%">
-                    <thead>
-                        <tr>
-                            <th>HWID</th>
-                            <th>Current Key</th>
-                            <th>Script</th>
-                            <th>Access Until</th>
-                            <th>Status</th>
-                            <th>Last Heartbeat</th>
-                            <th>Heartbeats</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {% for hwid, data in users.items() %}
-                        <tr>
-                            <td style="font-family:monospace; font-size:11px;">{{ hwid[:20] }}...</td>
-                            <td>{{ data.get('current_key', '-') }}</td>
-                            <td><span class="status-active">{{ data.get('active_script', 'unknown') }}</span></td>
-                            <td>{{ data.get('access_until_str', '-') }}</td>
-                            <td>{% if data.get('access_until', 0) > current_time %}<span class="status-active">🟢 Active</span>{% else %}<span class="status-inactive">🔴 Expired</span>{% endif %}</td>
-                            <td>{{ data.get('last_heartbeat_str', '-') }}</td>
-                            <td>{{ data.get('heartbeat_count', 0) }}</td>
-                        </tr>
-                        {% endfor %}
-                    </tbody>
+                <table>
+                    <tr><th>HWID</th><th>Key</th><th>Script</th><th>Access Until</th><th>Status</th><th>Heartbeats</th></tr>
+                    {% for hwid, data in users.items() %}
+                    <tr>
+                        <td style="font-size:11px;">{{ hwid[:15] }}...</td>
+                        <td>{{ data.get('current_key', '-') }}</td>
+                        <td>{{ data.get('active_script', '?') }}</td>
+                        <td>{{ data.get('access_until_str', '-') }}</td>
+                        <td>{% if data.get('access_until', 0) > current_time %}<span class="status-active">🟢</span>{% else %}<span class="status-inactive">🔴</span>{% endif %}</td>
+                        <td>{{ data.get('heartbeat_count', 0) }}</td>
+                    </tr>
+                    {% endfor %}
                 </table>
             </div>
         </div>
@@ -455,7 +498,6 @@ def dashboard():
     users = load_users()
     current_time = time.time()
     
-    # Calculate stats
     active_users = 0
     heartbeats_24h = 0
     
@@ -465,15 +507,6 @@ def dashboard():
         if data.get("last_heartbeat", 0) > current_time - 86400:
             heartbeats_24h += 1
     
-    # Format keys
-    keys_display = {}
-    for k, v in keys.items():
-        keys_display[k] = {
-            "url": v.get("url", ""),
-            "used_by": v.get("used_by", [])
-        }
-    
-    # Format users
     users_display = {}
     for hwid, data in users.items():
         users_display[hwid] = {
@@ -481,7 +514,6 @@ def dashboard():
             "active_script": data.get("active_script", "unknown"),
             "access_until_str": datetime.fromtimestamp(data.get("access_until", 0)).strftime("%Y-%m-%d %H:%M") if data.get("access_until") else "-",
             "access_until": data.get("access_until", 0),
-            "last_heartbeat_str": datetime.fromtimestamp(data.get("last_heartbeat", 0)).strftime("%Y-%m-%d %H:%M") if data.get("last_heartbeat") else "-",
             "heartbeat_count": data.get("heartbeat_count", 0)
         }
     
@@ -492,7 +524,7 @@ def dashboard():
         "heartbeats": heartbeats_24h
     }
     
-    return render_template_string(DASHBOARD_HTML, keys=keys_display, users=users_display, stats=stats, current_time=current_time)
+    return render_template_string(DASHBOARD_HTML, keys=keys, users=users_display, stats=stats, current_time=current_time)
 
 @app.route('/admin/generate', methods=['POST'])
 def admin_generate():
@@ -503,16 +535,21 @@ def admin_generate():
     keys = load_keys()
     current_time = time.time()
     
-    for _ in range(count):
+    uploaded = 0
+    for i in range(count):
         new_key = generate_random_key()
-        note_url = create_note_on_site(new_key)
-        final_url = exe_shorten(note_url) if note_url else None
+        filename = f"key_{new_key}.txt"
         
-        keys[new_key] = {
-            "url": final_url,
-            "created_at": current_time,
-            "used_by": []
-        }
+        # Upload to Up4ever
+        key_url = upload_to_up4ever(new_key, filename)
+        
+        if key_url:
+            keys[new_key] = {
+                "url": key_url,
+                "created_at": current_time,
+                "used_by": []
+            }
+            uploaded += 1
     
     save_keys(keys)
     return redirect('/dashboard')
